@@ -78,6 +78,17 @@ func TestReleaseAuthEnforcesTenantAndApprovalRole(t *testing.T) {
 	if unauthorized.Code != http.StatusUnauthorized {
 		t.Fatalf("missing token returned %d", unauthorized.Code)
 	}
+	emptyTenantToken, err := platformauth.IssueAccessToken(secret, "viewer", "", platformauth.RoleViewer, "controlplane", now, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyTenantReq := httptest.NewRequest(http.MethodGet, "/api/v1/releases", nil)
+	emptyTenantReq.Header.Set("Authorization", "Bearer "+emptyTenantToken)
+	emptyTenantRes := httptest.NewRecorder()
+	handler.ServeHTTP(emptyTenantRes, emptyTenantReq)
+	if emptyTenantRes.Code != http.StatusUnauthorized {
+		t.Fatalf("empty tenant exposed release list: %d", emptyTenantRes.Code)
+	}
 
 	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/releases", nil)
 	listReq.Header.Set("Authorization", "Bearer "+token)

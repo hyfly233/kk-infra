@@ -49,6 +49,7 @@ func main() {
 		auditStore = data.NewPostgresAuditStore(db)
 	}
 	svc := service.New(releaseStore, *registry, *probe, *token, auditStore)
+	svc.SetServiceSecret(*authSecret)
 	svc.SetBenchmarkPolicy(service.BenchmarkPolicy{MaxTTFTMs: *maxTTFT, MinTokensPerSec: *minThroughput, MaxErrorRate: *maxErrorRate})
 	handler := server.New(svc, logger)
 	if *authSecret != "" {

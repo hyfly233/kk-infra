@@ -8,11 +8,16 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
+	platformauth "kk-infra/lib/auth"
+	"kk-infra/lib/domain"
+	"kk-infra/lib/errcode"
 	"kk-infra/lib/middleware"
 	"kk-infra/services/pipeline"
 	"kk-infra/services/pipeline/internal/data"
@@ -24,6 +29,7 @@ type Service struct {
 	http                                   *http.Client
 	audit                                  data.AuditStore
 	benchmarkPolicy                        BenchmarkPolicy
+	serviceSecret                          string
 }
 
 type BenchmarkPolicy struct {
@@ -42,6 +48,45 @@ func New(store data.Store, modelRegistry, probeURL, token string, audits ...data
 
 func (s *Service) SetBenchmarkPolicy(policy BenchmarkPolicy) { s.benchmarkPolicy = policy }
 
+func (s *Service) SetServiceSecret(secret string) {
+	s.serviceSecret = secret
+	s.http.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+}
+
+func (s *Service) authorizeVersion(ctx context.Context, versionID, tenantID string) error {
+	if s.serviceSecret == "" {
+		return nil
+	}
+	if tenantID == "" {
+		return errcode.New(errcode.ErrUnauthorized, "发布租户必填")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.modelRegistry+"/api/v1/versions/"+url.PathEscape(versionID), nil)
+	if err != nil {
+		return err
+	}
+	token, err := platformauth.IssueServiceToken(s.serviceSecret, "pipeline", "modelregistry")
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := s.http.Do(req)
+	if err != nil {
+		return errcode.New(errcode.ErrUpstream, "模型归属查询失败")
+	}
+	defer resp.Body.Close()
+	var result struct {
+		Code int                 `json:"code"`
+		Data domain.ModelVersion `json:"data"`
+	}
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result) != nil || result.Code != 0 {
+		return errcode.New(errcode.ErrUpstream, "模型归属无法确认")
+	}
+	if result.Data.ID != versionID || result.Data.TenantID != tenantID {
+		return errcode.New(errcode.ErrUnauthorized, "版本不属于发布租户或尚未归属")
+	}
+	return nil
+}
+
 func id() string { b := make([]byte, 10); _, _ = rand.Read(b); return "rel-" + hex.EncodeToString(b) }
 
 func (s *Service) Start(ctx context.Context, versionID, operator string, tenantIDs ...string) (*pipeline.ReleaseRecord, error) {
@@ -52,6 +97,9 @@ func (s *Service) Start(ctx context.Context, versionID, operator string, tenantI
 	tenantID := ""
 	if len(tenantIDs) > 0 {
 		tenantID = tenantIDs[0]
+	}
+	if err := s.authorizeVersion(ctx, versionID, tenantID); err != nil {
+		return nil, err
 	}
 	r := &pipeline.ReleaseRecord{ID: id(), ModelVersionID: versionID, TenantID: tenantID, Operator: operator, Status: "RUNNING", CreatedAt: now, UpdatedAt: now}
 	if err := s.store.Create(r); err != nil {
@@ -97,6 +145,9 @@ func (s *Service) Approve(ctx context.Context, id, approver, message string, app
 	}
 	if r.Status != "PENDING_APPROVAL" {
 		return nil, fmt.Errorf("当前状态 %s 不允许审批", r.Status)
+	}
+	if err := s.authorizeVersion(ctx, r.ModelVersionID, r.TenantID); err != nil {
+		return nil, err
 	}
 	r.ApprovedBy = approver
 	r.ApprovalMessage = message
@@ -149,7 +200,17 @@ func (s *Service) recordAudit(ctx context.Context, action, actor, tenantID, reso
 	}
 }
 func (s *Service) modelAction(ctx context.Context, versionID, action string, token bool) error {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, s.modelRegistry+"/api/v1/versions/"+versionID+"/"+action, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.modelRegistry+"/api/v1/versions/"+url.PathEscape(versionID)+"/"+action, nil)
+	if err != nil {
+		return err
+	}
+	if s.serviceSecret != "" {
+		identity, err := platformauth.IssueServiceToken(s.serviceSecret, "pipeline", "modelregistry")
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+identity)
+	}
 	if token {
 		req.Header.Set("X-Pipeline-Token", s.pipelineToken)
 	}
@@ -160,6 +221,19 @@ func (s *Service) modelAction(ctx context.Context, versionID, action string, tok
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("modelregistry %s 返回 %s", action, resp.Status)
+	}
+	if s.serviceSecret != "" {
+		var result struct {
+			Code int                 `json:"code"`
+			Data domain.ModelVersion `json:"data"`
+		}
+		status := domain.ModelStatusValidated
+		if action == "release" {
+			status = domain.ModelStatusReleased
+		}
+		if json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result) != nil || result.Code != 0 || result.Data.ID != versionID || result.Data.Status != status || result.Data.TenantID == "" {
+			return fmt.Errorf("modelregistry %s 未确认预期状态", action)
+		}
 	}
 	return nil
 }

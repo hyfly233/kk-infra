@@ -147,7 +147,7 @@ func (s *Server) authRequired(next http.Handler) http.Handler {
 			return
 		}
 		claims, err := platformauth.ParseAccessToken(s.authSecret, strings.TrimPrefix(authz, "Bearer "), s.authAudience)
-		if err != nil {
+		if err != nil || (claims.Role != platformauth.RolePlatformAdmin && claims.TenantID == "") {
 			apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "access token 无效"))
 			return
 		}

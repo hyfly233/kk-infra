@@ -31,6 +31,8 @@ func MigrateAll(db *sql.DB) error {
 		"migrations/012_rollout_routes.sql",
 		"migrations/013_release_tenants.sql",
 		"migrations/014_serving_mode.sql",
+		"migrations/015_clusters.sql",
+		"migrations/016_cluster_serving_route.sql",
 	})
 }
 

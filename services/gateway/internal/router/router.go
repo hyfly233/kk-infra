@@ -17,6 +17,7 @@ type Route struct {
 	Endpoint       string `json:"endpoint"` // 后端 base URL（如 http://qwen-demo:80）
 	TenantID       string `json:"tenantId"` // 归属租户
 	DeploymentID   string `json:"deploymentId"`
+	ClusterID      string `json:"clusterId,omitempty"`
 	StableEndpoint string `json:"stableEndpoint,omitempty"`
 	CanaryEndpoint string `json:"canaryEndpoint,omitempty"`
 	RolloutStatus  string `json:"rolloutStatus,omitempty"`

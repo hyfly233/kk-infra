@@ -39,6 +39,7 @@ func MigrateAll(db *sql.DB) error {
 		"migrations/020_cluster_gpu_reservations.sql",
 		"migrations/021_deployment_quota_releases.sql",
 		"migrations/022_orphan_cleanup_claim.sql",
+		"migrations/023_model_tenant.sql",
 	})
 }
 

@@ -24,6 +24,7 @@ type Page struct {
 // ---- 模型 ----
 
 type CreateModelRequest struct {
+	TenantID    string `json:"tenantId,omitempty"`
 	Name        string `json:"name" binding:"required"`
 	Description string `json:"description"`
 }

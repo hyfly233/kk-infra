@@ -43,6 +43,7 @@ func CanTransitionVersion(from, to string) bool {
 
 // Model 模型主信息
 type Model struct {
+	TenantID    string    `json:"tenantId"`
 	ID          string    `json:"id"`
 	Name        string    `json:"name"`        // 模型名称，全局唯一
 	Description string    `json:"description"` // 模型说明
@@ -52,6 +53,7 @@ type Model struct {
 
 // ModelVersion 模型版本：一个模型可有多个版本，版本是部署的最小引用单元
 type ModelVersion struct {
+	TenantID           string     `json:"tenantId"`
 	ID                 string     `json:"id"`
 	ModelID            string     `json:"modelId"`        // 所属模型
 	ModelName          string     `json:"modelName"`      // 冗余模型名（modelregistry 填充）

@@ -1,0 +1,1 @@
+ALTER TABLE clusters ADD COLUMN IF NOT EXISTS volcano_queues JSONB NOT NULL DEFAULT '[]'::jsonb;

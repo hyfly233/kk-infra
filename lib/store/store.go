@@ -33,6 +33,12 @@ func MigrateAll(db *sql.DB) error {
 		"migrations/014_serving_mode.sql",
 		"migrations/015_clusters.sql",
 		"migrations/016_cluster_serving_route.sql",
+		"migrations/017_cluster_queue_capacity.sql",
+		"migrations/018_cluster_telemetry.sql",
+		"migrations/019_cluster_deployment_gpu.sql",
+		"migrations/020_cluster_gpu_reservations.sql",
+		"migrations/021_deployment_quota_releases.sql",
+		"migrations/022_orphan_cleanup_claim.sql",
 	})
 }
 

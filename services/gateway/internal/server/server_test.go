@@ -142,6 +142,25 @@ func TestChatCompletionsNonStream(t *testing.T) {
 	}
 }
 
+func TestGatewayForwardsSessionAffinityKey(t *testing.T) {
+	seen := ""
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Get("X-Carrot-Session-Id")
+		_, _ = w.Write([]byte(`{"choices":[],"usage":{"total_tokens":0}}`))
+	}))
+	defer upstream.Close()
+	h, _, routes, keys := newTestGateway(t)
+	key, _ := setupRouteAndKey(t, routes, keys, upstream.URL)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"qwen-demo","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("X-Carrot-Session-Id", "conversation-42")
+	res := httptest.NewRecorder()
+	h.ServeHTTP(res, req)
+	if res.Code != http.StatusOK || seen != "conversation-42" {
+		t.Fatalf("session affinity key not forwarded: status=%d seen=%q", res.Code, seen)
+	}
+}
+
 // 流式全链路：首 Token 统计
 // 注意：httptest.ResponseRecorder 不实现 http.Flusher，必须用真实 HTTP server 验证流式。
 func TestChatCompletionsStream(t *testing.T) {

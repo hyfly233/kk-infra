@@ -273,6 +273,9 @@ func (p *ClusterAdapterPool) ListDeploymentsAcrossClusters(ctx context.Context, 
 		if err != nil {
 			return nil, fmt.Errorf("list deployments in cluster %s: %w", cluster.ID, err)
 		}
+		for _, item := range list {
+			item.ClusterID = cluster.ID
+		}
 		result = append(result, list...)
 	}
 	return result, nil
@@ -300,6 +303,14 @@ func (p *ClusterAdapterPool) DeleteDeploymentForCluster(ctx context.Context, clu
 }
 
 // NewK8sAdapterClient 创建客户端
+func (p *ClusterAdapterPool) DeleteManagedDeploymentForCluster(ctx context.Context, clusterID, name, namespace, deploymentID string) error {
+	c, err := p.adapter(clusterID)
+	if err != nil {
+		return err
+	}
+	return c.do(ctx, http.MethodDelete, "/v1/deployments/"+url.PathEscape(name)+"/managed?namespace="+url.QueryEscape(namespace)+"&deploymentId="+url.QueryEscape(deploymentID), nil, nil)
+}
+
 func NewK8sAdapterClient(baseURL string) *K8sAdapterClient {
 	return &K8sAdapterClient{NewHTTPClient(baseURL)}
 }
@@ -334,6 +345,8 @@ type K8sDeploymentStatus struct {
 
 // K8sDeploymentResult 部署查询结果
 type K8sDeploymentResult struct {
+	Namespace      string                   `json:"namespace"`
+	ClusterID      string                   `json:"clusterId,omitempty"`
 	DeploymentID   string                   `json:"deploymentId"`
 	Name           string                   `json:"name"` // 部署名（k8sadapter 返回，R2-2 孤儿检测用）
 	Status         *K8sDeploymentStatus     `json:"status"`

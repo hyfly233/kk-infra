@@ -109,6 +109,16 @@ func (uc *DeploymentUseCase) CreateDeployment(ctx context.Context, req *apitypes
 	}
 	// 版本对应模型 ID（MVP：版本接口返回 ModelID）
 	modelID := version.ModelID
+	servingMode := req.ServingMode
+	if servingMode == "" {
+		servingMode = domain.ServingModeUnified
+	}
+	if servingMode != domain.ServingModeUnified && servingMode != domain.ServingModeDisaggregated {
+		return nil, errcode.New(errcode.ErrBadRequest, "servingMode 必须为 unified 或 disaggregated")
+	}
+	if servingMode == domain.ServingModeDisaggregated && version.Runtime != domain.RuntimeVLLM {
+		return nil, errcode.New(errcode.ErrBadRequest, "disaggregated 模式仅支持 vLLM")
+	}
 
 	// 2. 校验资源配额（GPU 足够 + 租户配额）
 	tenantID := req.TenantID
@@ -154,6 +164,7 @@ func (uc *DeploymentUseCase) CreateDeployment(ctx context.Context, req *apitypes
 			MemoryMB: version.MemoryMB,
 		},
 		Runtime:     version.Runtime,
+		ServingMode: servingMode,
 		StartupArgs: req.StartupArgs,
 		Status:      domain.DeploymentStatusNew,
 		CreatedAt:   now,
@@ -222,6 +233,7 @@ func (uc *DeploymentUseCase) submit(ctx context.Context, d *domain.ModelDeployme
 		ArtifactURI:    artifactURI,
 		ArtifactDigest: artifactDigest,
 		Runtime:        d.Runtime,
+		ServingMode:    d.ServingMode,
 	}
 	res, err := uc.kube.CreateDeployment(ctx, spec)
 	if err != nil {
@@ -463,6 +475,9 @@ func (uc *DeploymentUseCase) UpgradeDeployment(ctx context.Context, id, newVersi
 		return nil, errcode.New(errcode.ErrModelNotDeployable,
 			"新版本不可部署（状态="+version.Status+"），仅 RELEASED 可升级")
 	}
+	if d.ServingMode == domain.ServingModeDisaggregated && version.Runtime != domain.RuntimeVLLM {
+		return nil, errcode.New(errcode.ErrBadRequest, "disaggregated 部署不能升级到非 vLLM 运行时")
+	}
 	// 配额：新版本 GPU 需求变化时校验（资源规格可能不同）
 	if uc.quota != nil {
 		need := version.GPUCount * d.Replicas
@@ -484,6 +499,7 @@ func (uc *DeploymentUseCase) UpgradeDeployment(ctx context.Context, id, newVersi
 			GPUCount: version.GPUCount,
 			MemoryMB: version.MemoryMB,
 		}
+		dd.Runtime = version.Runtime
 		dd.Generation++
 	})
 
@@ -512,6 +528,7 @@ func (uc *DeploymentUseCase) UpgradeDeployment(ctx context.Context, id, newVersi
 		ArtifactURI:    artifactURI,
 		ArtifactDigest: artifactDigest,
 		Runtime:        version.Runtime,
+		ServingMode:    updated.ServingMode,
 	}
 	res, err := uc.kube.UpdateDeployment(ctx, spec)
 	if err != nil {

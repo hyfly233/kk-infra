@@ -31,14 +31,18 @@ type capacity struct {
 }
 
 type snapshot struct {
-	HealthStatus string     `json:"healthStatus"`
-	GPUCapacity  []capacity `json:"gpuCapacity"`
+	HealthStatus  string                            `json:"healthStatus"`
+	GPUCapacity   []capacity                        `json:"gpuCapacity"`
+	VolcanoQueues []domain.VolcanoQueueCapacity     `json:"volcanoQueues,omitempty"`
+	Telemetry     *domain.ClusterTelemetry          `json:"telemetry,omitempty"`
+	DeploymentGPU []domain.DeploymentGPUObservation `json:"deploymentGpu,omitempty"`
 }
 
 type Reporter struct {
 	source              gpuSource
 	endpoint, tokenFile string
 	client              *http.Client
+	telemetry           *telemetryCollector
 }
 
 func New(source gpuSource, controlplaneURL, clusterID, tokenFile string) (*Reporter, error) {
@@ -67,9 +71,31 @@ func (r *Reporter) Report(ctx context.Context) error {
 		return fmt.Errorf("cluster agent token file is empty")
 	}
 	collectCtx, cancelCollection := context.WithTimeout(ctx, 10*time.Second)
-	nodes, collectErr := r.source.ListGPUNodes(collectCtx)
+	var nodes []domain.GPUResource
+	var assigned []domain.DeploymentGPUObservation
+	var collectErr error
+	if source, ok := r.source.(interface {
+		ListGPUCapacitySnapshot(context.Context) ([]domain.GPUResource, []domain.DeploymentGPUObservation, error)
+	}); ok {
+		nodes, assigned, collectErr = source.ListGPUCapacitySnapshot(collectCtx)
+	} else {
+		nodes, collectErr = r.source.ListGPUNodes(collectCtx)
+	}
+	var queues []domain.VolcanoQueueCapacity
+	if collectErr == nil {
+		if source, ok := r.source.(interface {
+			ListVolcanoQueues(context.Context) ([]domain.VolcanoQueueCapacity, error)
+		}); ok {
+			queues, collectErr = source.ListVolcanoQueues(collectCtx)
+		}
+	}
 	cancelCollection()
 	payload := snapshot{HealthStatus: "healthy", GPUCapacity: []capacity{}}
+	if r.telemetry != nil {
+		telemetryCtx, cancelTelemetry := context.WithTimeout(ctx, 5*time.Second)
+		payload.Telemetry = r.telemetry.collect(telemetryCtx)
+		cancelTelemetry()
+	}
 	byType := map[string]capacity{}
 	if collectErr != nil {
 		payload.HealthStatus = "unhealthy"
@@ -88,6 +114,8 @@ func (r *Reporter) Report(ctx context.Context) error {
 		}
 	}
 	if payload.HealthStatus == "healthy" {
+		payload.DeploymentGPU = assigned
+		payload.VolcanoQueues = queues
 		for _, c := range byType {
 			payload.GPUCapacity = append(payload.GPUCapacity, c)
 		}

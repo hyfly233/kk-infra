@@ -24,6 +24,78 @@ type source struct {
 
 func (s *source) ListGPUNodes(context.Context) ([]domain.GPUResource, error) { return s.nodes, s.err }
 
+type queueSource struct {
+	source
+	queues   []domain.VolcanoQueueCapacity
+	queueErr error
+}
+
+type attributedSource struct{ source }
+
+func (s *attributedSource) ListGPUCapacitySnapshot(context.Context) ([]domain.GPUResource, []domain.DeploymentGPUObservation, error) {
+	generation := int64(0)
+	return s.nodes, []domain.DeploymentGPUObservation{{DeploymentID: "deploy-a", TenantID: "tenant-a", Namespace: "tenant-a", NodeName: "node-a", GPUType: "A100", GPUCount: 2, TemplateGeneration: &generation}}, s.err
+}
+
+func TestReporterForwardsAttributionAndClearsOnFailure(t *testing.T) {
+	var got snapshot
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = snapshot{}
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		fmt.Fprint(w, `{"code":0,"data":{"accepted":true}}`)
+	}))
+	defer api.Close()
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("test-token"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := &attributedSource{source{nodes: []domain.GPUResource{{GPUType: "A100", Total: 8, Allocatable: 8, Used: 2, Health: domain.GPUHealthHealthy}}}}
+	r, err := New(s, api.URL, "gpu-west", tokenFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Report(context.Background()); err != nil || len(got.DeploymentGPU) != 1 || got.DeploymentGPU[0].GPUCount != 2 {
+		t.Fatalf("attribution: %+v %v", got, err)
+	}
+	if got.DeploymentGPU[0].TemplateGeneration == nil || *got.DeploymentGPU[0].TemplateGeneration != 0 {
+		t.Fatal("zero template generation omitted from heartbeat")
+	}
+	s.err = errors.New("Pod watch failed")
+	if err := r.Report(context.Background()); err == nil || got.HealthStatus != "unhealthy" || len(got.DeploymentGPU) != 0 {
+		t.Fatalf("failed report: %+v %v", got, err)
+	}
+}
+
+func (s *queueSource) ListVolcanoQueues(context.Context) ([]domain.VolcanoQueueCapacity, error) {
+	return s.queues, s.queueErr
+}
+
+func TestQueueCollectionFailureReplacesHealthyCapacity(t *testing.T) {
+	var got snapshot
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		fmt.Fprint(w, `{"code":0,"data":{"accepted":true}}`)
+	}))
+	defer api.Close()
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("test-token"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s := &queueSource{source: source{nodes: []domain.GPUResource{{GPUType: "A100", Total: 8, Allocatable: 8, Health: domain.GPUHealthHealthy}}}, queues: []domain.VolcanoQueueCapacity{{Name: "tenant-a", State: "Open", Allocated: map[string]string{"nvidia.com/gpu": "2"}}}}
+	r, err := New(s, api.URL, "gpu-west", tokenFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Report(context.Background()); err != nil || len(got.VolcanoQueues) != 1 {
+		t.Fatalf("queue not reported: %+v %v", got, err)
+	}
+	s.queueErr = errors.New("Volcano API unavailable")
+	got = snapshot{}
+	if err := r.Report(context.Background()); err == nil || got.HealthStatus != "unhealthy" || len(got.VolcanoQueues) != 0 || len(got.GPUCapacity) != 0 {
+		t.Fatalf("queue failure retained capacity: %+v %v", got, err)
+	}
+}
+
 func TestReporterAggregatesRotatesTokenAndReplacesFailedSnapshot(t *testing.T) {
 	var got snapshot
 	var token string

@@ -23,7 +23,13 @@ type DeploymentRepository interface {
 	Get(id string) (*domain.ModelDeployment, error)
 	GetByName(name string) (*domain.ModelDeployment, error)
 	Update(d *domain.ModelDeployment) error
-	ClaimClusterRebuild(id, fromCluster, toCluster string, at time.Time) (*domain.ModelDeployment, error)
+	ClaimClusterRebuild(id, fromCluster, toCluster string, generation int64, at time.Time) (*domain.ModelDeployment, error)
+	AbortClusterRebuild(id, targetCluster, originalCluster string, generation int64, diagnostics string, at time.Time) error
+	BeginOrphanCleanup(id, cluster string, generation int64) error
+	EndOrphanCleanup(id, cluster string, success bool) error
+	OrphanCleanupState(id string) (string, bool, error)
+	ClaimScale(id string, generation int64, replicas int32, at time.Time) (*domain.ModelDeployment, error)
+	CompareStatus(id, from, to string, generation int64, at time.Time) error
 	List(tenantID string) ([]*domain.ModelDeployment, error)
 	Delete(id string) error
 	// 事件
@@ -41,6 +47,7 @@ type MemoryDeploymentRepository struct {
 	events    map[string][]domain.StatusEvent
 	revisions map[string][]domain.DeploymentRevision
 	seq       int
+	cleanup   map[string]cleanupClaim
 }
 
 // NewMemoryDeploymentRepository 创建内存仓库
@@ -50,6 +57,7 @@ func NewMemoryDeploymentRepository() *MemoryDeploymentRepository {
 		byName:    make(map[string]string),
 		events:    make(map[string][]domain.StatusEvent),
 		revisions: make(map[string][]domain.DeploymentRevision),
+		cleanup:   make(map[string]cleanupClaim),
 	}
 }
 
@@ -99,7 +107,7 @@ func (r *MemoryDeploymentRepository) Create(d *domain.ModelDeployment) error {
 	if d.ID == "" {
 		d.ID = "d" + itoa(r.seq)
 	}
-	r.deploys[d.ID] = d
+	r.deploys[d.ID] = cloneDeployment(d)
 	r.byName[d.Name] = d.ID
 	return nil
 }
@@ -111,7 +119,7 @@ func (r *MemoryDeploymentRepository) Get(id string) (*domain.ModelDeployment, er
 	if !ok {
 		return nil, ErrNotFound
 	}
-	return d, nil
+	return cloneDeployment(d), nil
 }
 
 func (r *MemoryDeploymentRepository) GetByName(name string) (*domain.ModelDeployment, error) {
@@ -121,7 +129,7 @@ func (r *MemoryDeploymentRepository) GetByName(name string) (*domain.ModelDeploy
 	if !ok {
 		return nil, ErrNotFound
 	}
-	return r.deploys[id], nil
+	return cloneDeployment(r.deploys[id]), nil
 }
 
 func (r *MemoryDeploymentRepository) Update(d *domain.ModelDeployment) error {
@@ -130,18 +138,18 @@ func (r *MemoryDeploymentRepository) Update(d *domain.ModelDeployment) error {
 	if _, ok := r.deploys[d.ID]; !ok {
 		return ErrNotFound
 	}
-	r.deploys[d.ID] = d
+	r.deploys[d.ID] = cloneDeployment(d)
 	return nil
 }
 
-func (r *MemoryDeploymentRepository) ClaimClusterRebuild(id, fromCluster, toCluster string, at time.Time) (*domain.ModelDeployment, error) {
+func (r *MemoryDeploymentRepository) ClaimClusterRebuild(id, fromCluster, toCluster string, generation int64, at time.Time) (*domain.ModelDeployment, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	d, ok := r.deploys[id]
 	if !ok {
 		return nil, ErrNotFound
 	}
-	if d.ClusterID != fromCluster || d.Status != domain.DeploymentStatusFailed || !strings.HasPrefix(d.Diagnostics, "目标集群不可用:") {
+	if r.cleanup[id].cluster != "" || d.ClusterID != fromCluster || d.Generation != generation || d.Status != domain.DeploymentStatusFailed || !strings.HasPrefix(d.Diagnostics, "目标集群不可用:") {
 		return nil, ErrConflict
 	}
 	updated := *d
@@ -150,7 +158,26 @@ func (r *MemoryDeploymentRepository) ClaimClusterRebuild(id, fromCluster, toClus
 	updated.Generation++
 	updated.UpdatedAt = at
 	r.deploys[id] = &updated
-	return &updated, nil
+	return cloneDeployment(&updated), nil
+}
+
+// AbortClusterRebuild is only used before any target workload has been submitted.
+func (r *MemoryDeploymentRepository) AbortClusterRebuild(id, targetCluster, originalCluster string, generation int64, diagnostics string, at time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	d, ok := r.deploys[id]
+	if !ok {
+		return ErrNotFound
+	}
+	if d.ClusterID != targetCluster || d.Generation != generation || d.Status != domain.DeploymentStatusSubmitting {
+		return ErrConflict
+	}
+	updated := cloneDeployment(d)
+	updated.ClusterID, updated.Status, updated.Diagnostics = originalCluster, domain.DeploymentStatusFailed, diagnostics
+	// Keep generation monotonic so late work cannot claim the previous attempt.
+	updated.UpdatedAt = at
+	r.deploys[id] = updated
+	return nil
 }
 
 func (r *MemoryDeploymentRepository) List(tenantID string) ([]*domain.ModelDeployment, error) {
@@ -159,10 +186,49 @@ func (r *MemoryDeploymentRepository) List(tenantID string) ([]*domain.ModelDeplo
 	out := make([]*domain.ModelDeployment, 0)
 	for _, d := range r.deploys {
 		if tenantID == "" || d.TenantID == tenantID {
-			out = append(out, d)
+			out = append(out, cloneDeployment(d))
 		}
 	}
 	return out, nil
+}
+
+func cloneDeployment(d *domain.ModelDeployment) *domain.ModelDeployment {
+	copy := *d
+	copy.StartupArgs = append([]string(nil), d.StartupArgs...)
+	return &copy
+}
+
+func (r *MemoryDeploymentRepository) CompareStatus(id, from, to string, generation int64, at time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	d, ok := r.deploys[id]
+	if !ok {
+		return ErrNotFound
+	}
+	if d.Status != from || d.Generation != generation {
+		return ErrConflict
+	}
+	updated := cloneDeployment(d)
+	updated.Status, updated.UpdatedAt = to, at
+	r.deploys[id] = updated
+	return nil
+}
+
+func (r *MemoryDeploymentRepository) ClaimScale(id string, generation int64, replicas int32, at time.Time) (*domain.ModelDeployment, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	d, ok := r.deploys[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if replicas < 0 || d.Generation != generation || (d.Status != domain.DeploymentStatusRunning && d.Status != domain.DeploymentStatusFailed) {
+		return nil, ErrConflict
+	}
+	updated := cloneDeployment(d)
+	updated.Status, updated.Replicas, updated.UpdatedAt = domain.DeploymentStatusScaling, replicas, at
+	updated.Generation++
+	r.deploys[id] = updated
+	return cloneDeployment(updated), nil
 }
 
 func (r *MemoryDeploymentRepository) Delete(id string) error {

@@ -16,22 +16,25 @@ type QuotaStore interface {
 	Set(tenantID, gpuType string, quota int32) error
 	// AddUsed 增加已用量（创建部署时），返回更新后的已用量
 	AddUsed(tenantID, gpuType string, delta int32) error
+	ReleaseDeployment(deploymentID, tenantID, gpuType string, count int32) error
 	// List 列出全部配额
 	List() ([]*domain.TenantQuota, error)
 }
 
 // ErrQuotaNotFound 配额不存在
 var ErrQuotaNotFound = errors.New("quota not found")
+var ErrQuotaExceeded = errors.New("quota exceeded")
 
 // MemoryQuotaStore 内存实现（默认 default 租户 16 GPU 配额）
 type MemoryQuotaStore struct {
-	mu     sync.RWMutex
-	quotas map[string]*domain.TenantQuota // tenantID/gpuType → quota
+	mu       sync.RWMutex
+	quotas   map[string]*domain.TenantQuota // tenantID/gpuType → quota
+	releases map[string]quotaRelease
 }
 
 // NewMemoryQuotaStore 创建内存配额存储
 func NewMemoryQuotaStore() *MemoryQuotaStore {
-	s := &MemoryQuotaStore{quotas: make(map[string]*domain.TenantQuota)}
+	s := &MemoryQuotaStore{quotas: make(map[string]*domain.TenantQuota), releases: make(map[string]quotaRelease)}
 	// 默认配额：default 租户 A100 16 卡（与 Fake 集群容量一致）
 	s.quotas["default/A100"] = &domain.TenantQuota{TenantID: "default", GPUType: "A100", Quota: 16, Used: 0}
 	return s
@@ -46,7 +49,8 @@ func (s *MemoryQuotaStore) Get(tenantID, gpuType string) (*domain.TenantQuota, e
 	if !ok {
 		return nil, ErrQuotaNotFound
 	}
-	return q, nil
+	copy := *q
+	return &copy, nil
 }
 
 func (s *MemoryQuotaStore) Set(tenantID, gpuType string, quota int32) error {
@@ -69,6 +73,9 @@ func (s *MemoryQuotaStore) AddUsed(tenantID, gpuType string, delta int32) error 
 	if !ok {
 		return ErrQuotaNotFound
 	}
+	if delta > 0 && int64(q.Used)+int64(delta) > int64(q.Quota) {
+		return ErrQuotaExceeded
+	}
 	q.Used += delta
 	if q.Used < 0 {
 		q.Used = 0
@@ -81,7 +88,8 @@ func (s *MemoryQuotaStore) List() ([]*domain.TenantQuota, error) {
 	defer s.mu.RUnlock()
 	out := make([]*domain.TenantQuota, 0, len(s.quotas))
 	for _, q := range s.quotas {
-		out = append(out, q)
+		copy := *q
+		out = append(out, &copy)
 	}
 	return out, nil
 }
@@ -122,14 +130,22 @@ func (s *PostgresQuotaStore) Set(tenantID, gpuType string, quota int32) error {
 
 func (s *PostgresQuotaStore) AddUsed(tenantID, gpuType string, delta int32) error {
 	res, err := s.db.Exec(
-		`UPDATE tenant_quotas SET used = GREATEST(used + $3, 0) WHERE tenant_id=$1 AND gpu_type=$2`,
+		`UPDATE tenant_quotas SET used = GREATEST(used::bigint + $3, 0)
+		 WHERE tenant_id=$1 AND gpu_type=$2 AND ($3 <= 0 OR used::bigint + $3 <= quota)`,
 		tenantID, gpuType, delta,
 	)
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrQuotaNotFound
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		if _, err := s.Get(tenantID, gpuType); err != nil {
+			return err
+		}
+		return ErrQuotaExceeded
 	}
 	return nil
 }

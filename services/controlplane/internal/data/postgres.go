@@ -114,13 +114,52 @@ func (r *PostgresDeploymentRepository) Update(d *domain.ModelDeployment) error {
 	return mapDeployErr(err)
 }
 
-func (r *PostgresDeploymentRepository) ClaimClusterRebuild(id, fromCluster, toCluster string, at time.Time) (*domain.ModelDeployment, error) {
-	row := r.db.QueryRow(`UPDATE deployments SET cluster_id=$3,status='SUBMITTING',diagnostics='',endpoint='',stable_endpoint='',canary_endpoint='',rollout_status='',generation=generation+1,updated_at=$4 WHERE id=$1 AND cluster_id=$2 AND status='FAILED' AND diagnostics LIKE '目标集群不可用:%' RETURNING `+deploymentCols, id, fromCluster, toCluster, at)
+func (r *PostgresDeploymentRepository) ClaimClusterRebuild(id, fromCluster, toCluster string, generation int64, at time.Time) (*domain.ModelDeployment, error) {
+	row := r.db.QueryRow(`UPDATE deployments SET cluster_id=$3,status='SUBMITTING',diagnostics='',endpoint='',stable_endpoint='',canary_endpoint='',rollout_status='',generation=generation+1,updated_at=$4 WHERE id=$1 AND cluster_id=$2 AND generation=$5 AND cleanup_cluster_id='' AND status='FAILED' AND diagnostics LIKE '目标集群不可用:%' RETURNING `+deploymentCols, id, fromCluster, toCluster, at, generation)
 	d, err := scanDeployment(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrConflict
 	}
 	return d, mapDeployErr(err)
+}
+
+func (r *PostgresDeploymentRepository) AbortClusterRebuild(id, targetCluster, originalCluster string, generation int64, diagnostics string, at time.Time) error {
+	result, err := r.db.Exec(`UPDATE deployments SET cluster_id=$3,status='FAILED',diagnostics=$5,updated_at=$6 WHERE id=$1 AND cluster_id=$2 AND generation=$4 AND status='SUBMITTING'`, id, targetCluster, originalCluster, generation, diagnostics, at)
+	if err != nil {
+		return mapDeployErr(err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrConflict
+	}
+	return nil
+}
+
+func (r *PostgresDeploymentRepository) ClaimScale(id string, generation int64, replicas int32, at time.Time) (*domain.ModelDeployment, error) {
+	row := r.db.QueryRow(`UPDATE deployments SET status='SCALING',replicas=$3,generation=generation+1,updated_at=$4 WHERE id=$1 AND generation=$2 AND status IN ('RUNNING','FAILED') AND $3>=0 RETURNING `+deploymentCols, id, generation, replicas, at)
+	d, err := scanDeployment(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrConflict
+	}
+	return d, mapDeployErr(err)
+}
+
+func (r *PostgresDeploymentRepository) CompareStatus(id, from, to string, generation int64, at time.Time) error {
+	result, err := r.db.Exec(`UPDATE deployments SET status=$3,updated_at=$4 WHERE id=$1 AND status=$2 AND generation=$5`, id, from, to, at, generation)
+	if err != nil {
+		return mapDeployErr(err)
+	}
+	n, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrConflict
+	}
+	return nil
 }
 
 func (r *PostgresDeploymentRepository) List(tenantID string) ([]*domain.ModelDeployment, error) {

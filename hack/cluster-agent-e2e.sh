@@ -65,14 +65,16 @@ curl --fail --silent --show-error -X POST "$cp_url/api/v1/clusters/gpu-test/agen
 
 "$test_dir/adapter" --fake=true --addr="127.0.0.1:$agent_port" \
   --cluster-id=gpu-test --controlplane-url="$cp_url" --cluster-agent-token-file="$test_dir/token" \
+  --agent-prometheus-url=http://127.0.0.1:1 \
   >"$test_dir/agent.log" 2>&1 &
 pids+=("$!")
 wait_ready "$agent_url"
 initial_report=false
 for _ in {1..50}; do
   if curl --fail --silent --show-error "$cp_url/api/v1/clusters" -H "Authorization: Bearer $admin_token" |
-    jq -e '.data[] | select(.id == "gpu-test") | .healthStatus == "healthy" and .lastHeartbeat != null and .gpuCapacity[0].gpuType == "A100" and .gpuCapacity[0].allocatable == 16 and .gpuCapacity[0].used == 0' >/dev/null; then
+    jq -e '.data[] | select(.id == "gpu-test") | .healthStatus == "healthy" and .lastHeartbeat != null and .gpuCapacity[0].gpuType == "A100" and .gpuCapacity[0].allocatable == 16 and .gpuCapacity[0].used == 0 and .telemetry.status == "unhealthy"' >/dev/null; then
     echo "PASS: administrator login -> agent token -> running Fake agent -> persisted capacity"
+    echo "PASS: unavailable Prometheus -> unhealthy telemetry without failing Kubernetes capacity"
     initial_report=true
     break
   fi
@@ -80,12 +82,46 @@ for _ in {1..50}; do
 done
 [ "$initial_report" = true ] || { echo "Agent did not report expected capacity" >&2; exit 1; }
 
+monitor_token=$(curl --fail --silent --show-error -X POST "$cp_url/api/v1/clusters/monitor-token" \
+  -H "Authorization: Bearer $admin_token" | jq -er '.data.token')
+curl --fail --silent --show-error "$cp_url/internal/clusters/metrics" -H "Authorization: Bearer $monitor_token" |
+  grep -Fq 'carrot_cluster_alert{cluster_id="gpu-test",kind="telemetry"} 1'
+curl --fail --silent --show-error "$cp_url/api/v1/clusters/alerts" -H "Authorization: Bearer $admin_token" |
+  jq -e '.data[] | select(.fingerprint == "gpu-test/telemetry")' >/dev/null
+echo "PASS: telemetry alert API and scoped Prometheus metrics"
+
+# Synthetic Queue snapshot tests the HTTP/storage contract, not real Volcano collection.
+agent_token=$(<"$test_dir/token")
+curl --fail --silent --show-error "$cp_url/api/v1/clusters/gpu-test/heartbeat" \
+  -H "Authorization: Bearer $agent_token" -H 'Content-Type: application/json' \
+  -d '{"healthStatus":"healthy","gpuCapacity":[{"gpuType":"A100","total":16,"allocatable":16,"used":0}],"volcanoQueues":[{"name":"tenant-test","state":"Open","capability":{"nvidia.com/gpu":"8"},"allocated":{"nvidia.com/gpu":"2"},"pending":3}]}' |
+  jq -e '.code == 0 and .data.accepted' >/dev/null
+curl --fail --silent --show-error "$cp_url/api/v1/clusters" -H "Authorization: Bearer $admin_token" |
+  jq -e '.data[] | select(.id == "gpu-test") | .volcanoQueues[0].pending == 3 and .volcanoQueues[0].allocated["nvidia.com/gpu"] == "2"' >/dev/null
+echo "PASS: synthetic Volcano queue heartbeat -> persisted administrator query"
+curl --fail --silent --show-error "$cp_url/api/v1/clusters/alerts" -H "Authorization: Bearer $admin_token" |
+  jq -e '.data | length == 0' >/dev/null
+echo "PASS: cleared telemetry snapshot resolves active alert"
+
+curl --fail --silent --show-error "$agent_url/v1/deployments" -H 'Content-Type: application/json' \
+  -d '{"deploymentId":"cleanup-probe","name":"cleanup-probe","namespace":"tenant-test","replicas":1,"runtime":"vLLM","resource":{"gpuType":"A100","gpuCount":1}}' |
+  jq -e '.code == 0' >/dev/null
+curl --silent --show-error -X DELETE "$agent_url/v1/deployments/cleanup-probe/managed?namespace=tenant-test&deploymentId=wrong-id" |
+  jq -e '.code != 0' >/dev/null
+curl --fail --silent --show-error "$agent_url/v1/deployments/cleanup-probe?namespace=tenant-test" |
+  jq -e '.data.deploymentId == "cleanup-probe"' >/dev/null
+for _ in {1..2}; do
+  curl --fail --silent --show-error -X DELETE "$agent_url/v1/deployments/cleanup-probe/managed?namespace=tenant-test&deploymentId=cleanup-probe" |
+    jq -e '.code == 0 and .data.deleted' >/dev/null
+done
+echo "PASS: managed Fake deletion rejects wrong identity and retries idempotently"
+
 curl --fail --silent --show-error "$agent_url/v1/deployments" -H 'Content-Type: application/json' \
   -d '{"deploymentId":"heartbeat-load","name":"heartbeat-load","namespace":"tenant-test","replicas":1,"runtime":"vLLM","resource":{"gpuType":"A100","gpuCount":2}}' |
   jq -e '.code == 0' >/dev/null
 for _ in {1..70}; do
   if curl --fail --silent --show-error "$cp_url/api/v1/clusters" -H "Authorization: Bearer $admin_token" |
-    jq -e '.data[] | select(.id == "gpu-test") | .healthStatus == "healthy" and .gpuCapacity[0].used == 2' >/dev/null; then
+    jq -e '.data[] | select(.id == "gpu-test") | .healthStatus == "healthy" and .gpuCapacity[0].used == 2 and ((.volcanoQueues // []) | length) == 0 and .telemetry.status == "unhealthy"' >/dev/null; then
     echo "PASS: periodic heartbeat replaces capacity after Fake workload allocation"
     exit 0
   fi

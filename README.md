@@ -87,9 +87,9 @@ npm install
 npm run dev        # http://localhost:5173
 ```
 
-登录页支持两种角色（MVP 本地模拟，不接真实认证）：
-- **管理员**：全量管理（部署向导 / API Key / 系统设置）
-- **普通用户**：只读查看模型与服务
+控制台使用邮箱、密码和租户 ID 调用真实登录 API，使用短期 access token、刷新和退出接口；会话支持平台管理员、租户管理员、开发者和只读者。需为 controlplane 配置签名密钥并启用认证，提前创建账号和租户成员关系。无认证 Fake 开发模式不能直接登录控制台。其他服务的管理接口统一鉴权及租户隔离尚待收口，当前不能将控制台登录视为整个系统已安全隔离；这些端口不得直接暴露给非可信网络。
+
+Notebook 管理、Hub 身份和部署配置见 [Notebook 指南](docs/NOTEBOOK.md)。
 
 ### 3.3 一键验证 MVP 闭环（Fake 环境）
 
@@ -221,7 +221,8 @@ kk-infra/
 - 适配器已提供 vLLM、Triton、TensorRT-LLM 的基础运行时渲染；后两者的真实模型仓库与集群启动尚未验收。
 - Volcano Queue/PodGroup 集成和 JupyterHub 部署清单已提供；需要安装对应组件的真实集群验收。
 - `unified` 部署可用；`disaggregated` 的 NIXL 代理已有原型，但 Prefill/Decode Kubernetes 生命周期仍未完成，适配器会拒绝该模式。
-- 多集群注册、基础放置和 agent 容量心跳已有首版，跨集群入口发现、故障重建等仍待完成。各里程碑的详细状态见 [路线计划](docs/ROADMAP-V2.md)。AIOps 仍属后续范围。
+- 多集群注册、基础放置、informer 容量采集、Volcano/Prometheus/DCGM 上报、独立集群告警和受审计人工故障重建已有首版。新建、扩容、升级和重建提交前已接入持久化并发容量预留；升级保留旧模板，重建保留原集群预留。缩容及旧模板/孤儿预留回收、租户配额一致性与失败/重启完整修复尚未闭环，凭据自动续期和跨集群入口发现仍待完成。旧部署缺少对应模型版本预留时扩容暂时拒绝，需迁移或对账恢复。详细状态见 [路线计划](docs/ROADMAP-V2.md) 与 [六个里程碑收口清单](docs/MILESTONE-COMPLETION.md)。AIOps 仍属后续范围。
+- 旧集群清理首版：管理员通过部署 `orphan-reservations` 查询核对，再显式调用 `POST /api/v1/deployments/{id}/orphan-cleanup` 并确认删除。清理认领阻止跨集群重建，身份/UID 校验删除确认后只释放旧集群预留；执行中崩溃保留锁定，不自动解锁。需要应用 migration 022 并先升级 adapter，不能回退到不校验身份的删除接口。
 
 ## 9. 多集群容量心跳
 
@@ -239,8 +240,16 @@ go run ./services/k8sadapter/cmd --fake=false \
   --cluster-agent-token-file=/run/secrets/agent/token
 ```
 
-Agent 启动后立即上报，以后每 30 秒更新一次。Kubeconfig 身份须有集群范围的 `list nodes`、`list pods` 权限。GPU 型号优先使用节点标签 `carrot.ai/gpu-type`，其次 `nvidia.com/gpu.product`；缺少标签、节点非 Ready/不可调度或采集失败时上报 unhealthy。占用统计按已绑定且未终止的 Pod 请求量计算，包括正在删除的 Pod；GPU 限额默认请求与 init/sidecar 峰值遵循 [Kubernetes GPU](https://kubernetes.io/docs/tasks/manage-gpus/scheduling-gpus/) 和 [sidecar 资源规则](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/#resource-sharing-within-containers)。这不是 DCGM 利用率采集。
+Agent 启动后立即上报，以后每 30 秒更新一次。真实 adapter 使用 client-go Node/全命名空间 Pod informer；Kubeconfig 身份须有集群范围的 `list/watch nodes`、`list/watch pods` 权限，并允许 `GET /version` 健康探测。初次缓存同步未完成、watch 错误或 API 探测失败时上报 unhealthy，不使用 REST 全量查询绕过缓存错误。GPU 型号优先使用节点标签 `carrot.ai/gpu-type`，其次 `nvidia.com/gpu.product`；缺少标签或节点非 Ready/不可调度时上报 unhealthy。占用统计按已绑定且未终止的 Pod 请求量计算，包括正在删除的 Pod；GPU 限额默认请求与 init/sidecar 峰值遵循 [Kubernetes GPU](https://kubernetes.io/docs/tasks/manage-gpus/scheduling-gpus/) 和 [sidecar 资源规则](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/#resource-sharing-within-containers)。这不是 DCGM 利用率采集。
 
 本地可用 `--fake=true` 演示心跳，该数据是模拟容量；`--virtual-gpus` 也仅用于开发。超过 90 秒没有新心跳的集群会被放置筛选排除。当前采用保守策略：任一 GPU 节点异常即停止将新部署放入该集群。Agent 通过 HTTPS 连接控制面；跨集群 adapter 和推理入口的实际连通性仍须在部署环境验证。
+
+真实 adapter 增加 `--volcano-enabled=true` 后，每轮心跳查询 `scheduling.volcano.sh/v1beta1/queues`；kubeconfig 身份还须有集群范围 `list queues` 权限。心跳及管理员集群列表的 `volcanoQueues` 保存状态、capability/deserved/allocated 原始资源量和排队任务数；这些值不等同于可立即调度 GPU，最终准入仍由 Volcano 决定。CRD 缺失、权限拒绝或查询失败时报告 unhealthy 并清除旧快照。未启用 Volcano 时不查询该 API。已有 PostgreSQL 安装启动控制面时需执行 migration 017。
+
+可选 `--agent-prometheus-url=http://prometheus.monitoring.svc.cluster.local:9090` 启用本集群遥测，要求 Prometheus 的 `job="dcgm"` 仅包含该集群 exporter。上报 GPU 利用率（%）、显存使用/剩余（MiB）、最后 XID 错误码及 scrape up，保留 labels、求值时间和最旧样本年龄；求值时间不是原始 scrape 时间。缺失、过期（90 秒）、非有限值和无效大值都报告为遥测 unhealthy，而非伪零值。遥测不可用不会单独导致部署 FAILED，历史 XID 也不是当前硬件健康判定。未启用时 `telemetry` 缺省，重新禁用后清除旧快照；PostgreSQL 使用 migration 018 持久化此字段。
+
+管理员 `GET /api/v1/clusters/alerts` 查询当前集群告警：注册后/最后心跳超过 90 秒为 `offline`，新鲜 unhealthy 心跳为 `unhealthy`，启用的遥测失败或过期为 `telemetry`。无需先创建部署；离线时不再重复报警旧遥测，恢复后条件解除。返回稳定 `fingerprint` 和最近观测时间，不是持久化告警历史。
+
+Prometheus 抓取使用管理员 `POST /api/v1/clusters/monitor-token` 签发的专用 token（24 小时），只允许 `GET /internal/clusters/metrics`，不允许管理 API 或心跳写入。将 token 作为只读 Secret 文件挂载到 Prometheus，再启用 `deployments/k8s/11-prometheus.yaml` 的 `carrot-cluster-monitor` 示例 job，使用 `authorization.credentials_file` 读取文件；不要使用管理员 access token 或在 ConfigMap 中写明文凭据。到期前重新签发并替换文件。跨网络抓取使用 HTTPS，并限制入口来源为监控服务。`13-alert-rules.yaml` 包含独立集群规则；生产通知还需配置 Prometheus 到 Alertmanager 及其接收器，当前清单不自动安装通知渠道。
 
 运行 `bash hack/cluster-agent-e2e.sh` 可验证管理员初始化、登录、集群注册、token 签发、agent 上报与容量保存。脚本需要 Go、curl、jq，使用独立内存服务和 Fake K8s，默认端口为 18080/18082/18083；遇到占用会退出，完成后停止自身进程并保留临时日志。它不替代真实集群验收。

@@ -106,6 +106,18 @@ func main() {
 		srv.SetClusterService(clusterService)
 	}
 	srv.SetTenantProvisioner(kubeClient)
+	if hubURL := os.Getenv("NOTEBOOK_HUB_URL"); hubURL != "" {
+		if *authSecret == "" {
+			logger.Error("Notebook 必须启用真实认证")
+			os.Exit(1)
+		}
+		hub, err := clients.NewNotebookHubClient(hubURL, os.Getenv("NOTEBOOK_PUBLIC_URL"), os.Getenv("NOTEBOOK_HUB_API_TOKEN"))
+		if err != nil {
+			logger.Error("初始化 Notebook Hub 失败", "err", err)
+			os.Exit(1)
+		}
+		srv.SetNotebookHub(hub)
+	}
 	if *authSecret != "" {
 		identityService := identity.NewService(*authSecret)
 		if db != nil {

@@ -39,6 +39,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/deployments/{name}/scale", s.handleScaleDeployment)
 	mux.HandleFunc("POST /v1/deployments/{name}/restart", s.handleRestartDeployment)
 	mux.HandleFunc("DELETE /v1/deployments/{name}", s.handleDeleteDeployment)
+	mux.HandleFunc("DELETE /v1/deployments/{name}/managed", s.handleDeleteManagedDeployment)
 	return middleware.WithRequestID(
 		middleware.Recover(s.logger,
 			middleware.AccessLog(s.logger, mux),
@@ -193,6 +194,14 @@ func (s *Server) handleRestartDeployment(w http.ResponseWriter, r *http.Request)
 	apitypes.WriteResult(w, r, res, nil)
 }
 
+func (s *Server) handleDeleteManagedDeployment(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("deploymentId") == "" {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, "deploymentId 必填"))
+		return
+	}
+	s.handleDeleteDeployment(w, r)
+}
+
 func (s *Server) handleDeleteDeployment(w http.ResponseWriter, r *http.Request) {
 	ns := r.URL.Query().Get("namespace")
 	if ns == "" {
@@ -201,7 +210,20 @@ func (s *Server) handleDeleteDeployment(w http.ResponseWriter, r *http.Request) 
 	ctx, cancel := s.reqCtx(r)
 	defer cancel()
 	// 幂等删除：不存在也返回成功
-	if err := s.kube.DeleteDeployment(ctx, r.PathValue("name"), ns); err != nil {
+	var err error
+	if id := r.URL.Query().Get("deploymentId"); id != "" {
+		managed, ok := s.kube.(interface {
+			DeleteManagedDeployment(context.Context, string, string, string) error
+		})
+		if !ok {
+			apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrIllegalState, "adapter 不支持身份校验删除"))
+			return
+		}
+		err = managed.DeleteManagedDeployment(ctx, r.PathValue("name"), ns, id)
+	} else {
+		err = s.kube.DeleteDeployment(ctx, r.PathValue("name"), ns)
+	}
+	if err != nil {
 		apitypes.WriteResult(w, r, nil, errcode.Wrap(errcode.ErrInternal, "删除部署失败", err))
 		return
 	}

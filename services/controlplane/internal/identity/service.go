@@ -325,6 +325,20 @@ func (s *Service) Authenticate(token string) (*platformauth.Claims, error) {
 	return platformauth.ParseAccessToken(s.secret, token, "controlplane")
 }
 
+func (s *Service) IssueClusterMonitorToken() (string, time.Time, error) {
+	now := s.now()
+	token, err := platformauth.IssueAccessToken(s.secret, "cluster-monitor", "", platformauth.RoleViewer, "cluster-monitor", now, 24*time.Hour)
+	return token, now.Add(24 * time.Hour), err
+}
+
+func (s *Service) AuthenticateClusterMonitor(token string) error {
+	claims, err := platformauth.ParseAccessToken(s.secret, token, "cluster-monitor")
+	if err != nil || claims.Subject != "cluster-monitor" || claims.Role != platformauth.RoleViewer {
+		return fmt.Errorf("invalid cluster monitor token")
+	}
+	return nil
+}
+
 func (s *Service) AuthenticateClusterAgent(token, clusterID string) (*platformauth.Claims, error) {
 	claims, err := platformauth.ParseAccessToken(s.secret, token, "cluster-agent:"+clusterID)
 	if err != nil || claims.Subject != clusterID {

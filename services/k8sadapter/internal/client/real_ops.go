@@ -187,6 +187,9 @@ type deploymentList struct {
 
 // CreateDeployment 幂等创建 Deployment + Service
 func (c *RealKubeClient) CreateDeployment(ctx context.Context, spec *DeploymentSpec) (*DeploymentResult, error) {
+	if err := c.validateServingCapability(spec); err != nil {
+		return nil, err
+	}
 	ns := spec.Namespace
 	if ns == "" {
 		ns = c.namespace
@@ -254,6 +257,9 @@ func (c *RealKubeClient) CreateDeployment(ctx context.Context, spec *DeploymentS
 
 // UpdateDeployment 更新现有 Deployment 的 Pod template；Service 保持不变。
 func (c *RealKubeClient) UpdateDeployment(ctx context.Context, spec *DeploymentSpec) (*DeploymentResult, error) {
+	if err := c.validateServingCapability(spec); err != nil {
+		return nil, err
+	}
 	ns := spec.Namespace
 	if ns == "" {
 		ns = c.namespace
@@ -302,6 +308,32 @@ func (c *RealKubeClient) UpdateDeployment(ctx context.Context, spec *DeploymentS
 		return nil, err
 	}
 	return c.GetDeployment(ctx, spec.Name, ns)
+}
+
+func validateServingCapability(spec *DeploymentSpec) error {
+	if spec.ServingMode == "" || spec.ServingMode == domain.ServingModeUnified {
+		return nil
+	}
+	if spec.ServingMode != domain.ServingModeDisaggregated {
+		return fmt.Errorf("不支持的 servingMode: %s", spec.ServingMode)
+	}
+	if spec.Runtime != domain.RuntimeVLLM {
+		return fmt.Errorf("disaggregated 模式仅支持 vLLM")
+	}
+	return nil
+}
+
+func (c *RealKubeClient) validateServingCapability(spec *DeploymentSpec) error {
+	if err := validateServingCapability(spec); err != nil {
+		return err
+	}
+	if spec.ServingMode == domain.ServingModeDisaggregated && c.disaggProxyImage == "" {
+		return fmt.Errorf("disaggregated serving capability unavailable: 未配置 proxy image")
+	}
+	if spec.ServingMode == domain.ServingModeDisaggregated {
+		return fmt.Errorf("disaggregated serving capability unavailable: Prefill/Decode 工作负载尚未渲染")
+	}
+	return nil
 }
 
 // GetDeployment 查询部署状态（含 Pod/事件）

@@ -40,6 +40,11 @@ type RealKubeClient struct {
 	progressiveEnabled bool
 	volcanoEnabled     bool
 	volcanoQueuePrefix string
+	disaggProxyImage   string
+}
+
+func (c *RealKubeClient) ConfigureDisaggregatedServing(proxyImage string) {
+	c.disaggProxyImage = strings.TrimSpace(proxyImage)
 }
 
 // ConfigureKEDA controls dynamic ScaledObject reconciliation for real clusters.

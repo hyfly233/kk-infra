@@ -28,7 +28,7 @@ type vllmDriver struct{}
 func (vllmDriver) Runtime() string { return domain.RuntimeVLLM }
 func (vllmDriver) Build(modelPath string, startupArgs []string) RuntimeContainer {
 	args := []string{"--model", modelPath, "--host", "0.0.0.0", "--port", "8000"}
-	return RuntimeContainer{Name: "vllm", Image: "vllm/vllm-openai:latest", Args: append(args, startupArgs...), Port: 8000, HealthPath: "/health", MetricsPath: "/metrics"}
+	return RuntimeContainer{Name: "vllm", Image: "vllm/vllm-openai:v0.11.1", Args: append(args, startupArgs...), Port: 8000, HealthPath: "/health", MetricsPath: "/metrics"}
 }
 func (vllmDriver) MetricMap() map[string]string {
 	return map[string]string{"ttft": "vllm:time_to_first_token_seconds", "tpot": "vllm:time_per_output_token_seconds", "queue": "vllm:num_requests_waiting", "kv_cache": "vllm:gpu_cache_usage_perc"}

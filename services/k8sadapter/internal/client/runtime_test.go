@@ -50,3 +50,15 @@ func TestRuntimeDriverRejectsUnknownRuntime(t *testing.T) {
 		t.Fatal("unknown runtime must be rejected")
 	}
 }
+
+func TestDisaggregatedCapabilityRejectsUnsupportedRuntime(t *testing.T) {
+	if err := validateServingCapability(&DeploymentSpec{ServingMode: domain.ServingModeDisaggregated, Runtime: domain.RuntimeTriton}); err == nil || !strings.Contains(err.Error(), "仅支持 vLLM") {
+		t.Fatalf("non-vLLM disaggregated mode must be rejected: %v", err)
+	}
+	if err := validateServingCapability(&DeploymentSpec{ServingMode: domain.ServingModeDisaggregated, Runtime: domain.RuntimeVLLM}); err != nil {
+		t.Fatalf("vLLM disaggregated mode should be supported: %v", err)
+	}
+	if err := validateServingCapability(&DeploymentSpec{ServingMode: domain.ServingModeUnified, Runtime: domain.RuntimeVLLM}); err != nil {
+		t.Fatalf("unified mode should remain available: %v", err)
+	}
+}

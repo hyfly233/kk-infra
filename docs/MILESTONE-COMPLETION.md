@@ -6,6 +6,7 @@
 
 - [ ] 逐项复核 restart、upgrade、Gateway PostgreSQL 恢复、详情指标/事件/诊断/日志及设置页，补齐对应测试证据。
 - [ ] 修复完整契约/E2E 的 artifact fixture，让开发链路能够通过实际 artifact 校验与发布门禁，而非绕过它们。
+- [x] 本地开发发布脚本收口：契约测试改走 pipeline 启动/审批，不再直接 release；契约与 Fake E2E 检查 PENDING_APPROVAL、审批结果和最终版本 RELEASED，失败不打印发布成功。全量 Go、完整契约及 Fake 全链路通过。仍使用开发 artifact verifier/Mock 推理，不代表实际 S3 字节校验或临时模型探针验收。
 
 ## 2. 安全、多租户与单集群
 
@@ -17,6 +18,7 @@
 - [x] 控制面/Notebook 当前成员复核：登录、access JWT 与 refresh 检查用户/租户启用状态和当前成员；角色变更拒绝旧 JWT，刷新只签发当前角色。PG 实时关联查询超时失败关闭；新成员租户登记不覆盖 PG 已停用状态。身份单测、控制面 HTTP 回归及降权/刷新 Fake E2E 通过；真实 PG 多实例验收未运行。
 - [x] 跨服务用户成员复核：gateway Key 管理、modelregistry、pipeline 每个用户请求经内部服务 JWT 查询控制面当前成员；身份/角色/租户/期限必须匹配，超时、异常和缺失客户端失败关闭，不缓存放行或跟随重定向。服务身份权限保持独立。共享客户端、控制面 HTTP 契约、全量 Go 及两个独立进程降权 Fake E2E 通过；真实 PostgreSQL 多实例和网络验收未运行。
 - [ ] 已确认缺口：历史归属恢复和整体 NetworkPolicy 尚未收口；不标记安全里程碑完成。
+- [x] 同集群管理入口 NetworkPolicy 基线：`15-management-access.yaml` 对四个管理服务默认拒绝，按实际调用关系放行同 namespace/app 的指定端口；本地 YAML 解码和允许/拒绝矩阵覆盖非授权 Pod、跨命名空间及错误端口。未应用集群；远端来源 overlay、egress、共用端口入口代理及真实 CNI 验收仍待完成。
 - [ ] 对齐租户启停、Namespace/RBAC/Quota/NetworkPolicy 的幂等生命周期和失败恢复。
 - [x] 孤儿扫描覆盖所有命名空间，按集群/namespace/名称匹配，检测事件写审计并在同一进程周期内去重；不自动删除。已补 Fake/模拟 API 与审计回归，真实 API 权限验收未运行。
 - [ ] 验证副本漂移修复、租户配额与部署状态的原子认领、失败/删除/重启释放一致性。

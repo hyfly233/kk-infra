@@ -1,0 +1,102 @@
+# Same-cluster ingress baseline. Requires enforcing CNI and matching app labels.
+# console is the trusted reverse-proxy Pod, not the browser. Remote agents and
+# external ingress require explicit source overlays; never open 0.0.0.0/0.
+# This policy does not restrict egress or distinguish paths on shared HTTP ports.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: management-default-deny
+  namespace: carrot-ai
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [controlplane, modelregistry, pipeline, k8sadapter]
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: controlplane-access
+  namespace: carrot-ai
+spec:
+  podSelector:
+    matchLabels:
+      app: controlplane
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app: console}
+        - podSelector:
+            matchLabels: {app: gateway}
+        - podSelector:
+            matchLabels: {app: modelregistry}
+        - podSelector:
+            matchLabels: {app: pipeline}
+        - podSelector:
+            matchLabels: {app: k8sadapter}
+        - podSelector:
+            matchLabels: {app: observability}
+      ports:
+        - protocol: TCP
+          port: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: modelregistry-access
+  namespace: carrot-ai
+spec:
+  podSelector:
+    matchLabels:
+      app: modelregistry
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app: console}
+        - podSelector:
+            matchLabels: {app: controlplane}
+        - podSelector:
+            matchLabels: {app: pipeline}
+      ports:
+        - protocol: TCP
+          port: 8081
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: adapter-access
+  namespace: carrot-ai
+spec:
+  podSelector:
+    matchLabels:
+      app: k8sadapter
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app: controlplane}
+      ports:
+        - protocol: TCP
+          port: 8082
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: pipeline-access
+  namespace: carrot-ai
+spec:
+  podSelector:
+    matchLabels:
+      app: pipeline
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: {app: console}
+      ports:
+        - protocol: TCP
+          port: 8086

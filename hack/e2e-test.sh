@@ -68,10 +68,14 @@ MODEL_ID=$(curl -s "$MR/api/v1/models" | json_field "['data'][0]['id']")
 VER_JSON=$(curl -s -X POST "$MR/api/v1/models/$MODEL_ID/versions" -H 'Content-Type: application/json' \
   -d '{"version":"7b","artifactUri":"s3://models/qwen-7b","runtime":"vLLM","gpuType":"A100","gpuCount":1,"memoryMB":2048,"contextLength":8192}')
 VERSION_ID=$(echo "$VER_JSON" | json_field "['data']['id']")
-RELEASE_ID=$(curl -s -X POST "$PIPELINE/api/v1/releases" -H 'Content-Type: application/json' \
-  -d "{\"modelVersionId\":\"$VERSION_ID\",\"operator\":\"e2e\"}" | json_field "['data']['id']")
-curl -s -X POST "$PIPELINE/api/v1/releases/$RELEASE_ID/approval" -H 'Content-Type: application/json' \
-  -d '{"approver":"e2e-admin","approved":true,"message":"E2E approval"}' >/dev/null
+RELEASE=$(curl -sf -X POST "$PIPELINE/api/v1/releases" -H 'Content-Type: application/json' \
+  -d "{\"modelVersionId\":\"$VERSION_ID\",\"tenantId\":\"default\",\"operator\":\"e2e\"}")
+RELEASE_ID=$(echo "$RELEASE" | json_field "['data']['id']")
+[ "$(echo "$RELEASE" | json_field "['data']['status']")" = "PENDING_APPROVAL" ] || fail "发布门禁未通过"
+APPROVAL=$(curl -sf -X POST "$PIPELINE/api/v1/releases/$RELEASE_ID/approval" -H 'Content-Type: application/json' \
+  -d '{"approver":"e2e-admin","approved":true,"message":"E2E approval"}')
+[ "$(echo "$APPROVAL" | json_field "['data']['status']")" = "RELEASED" ] || fail "发布审批失败"
+[ "$(curl -sf "$MR/api/v1/versions/$VERSION_ID" | json_field "['data']['status']")" = "RELEASED" ] || fail "版本未发布"
 echo "版本已校验并发布 (RELEASED)"
 
 # ---------- 4. 创建部署 ----------

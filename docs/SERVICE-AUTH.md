@@ -48,6 +48,10 @@ migration 023 持久化模型 `tenant_id`，版本继承模型归属。普通用
 
 `deployments/k8s/14-observability-access.yaml` 限制 observability 8084 入口为同 namespace 的 controlplane、gateway、k8sadapter 和 prometheus Pod。清单默认 `carrot-ai`，应用前必须与实际部署 namespace/`app` 标签对齐；若另有 NetworkPolicy 放行，Kubernetes 策略的并集可能扩大入口。
 
+`15-management-access.yaml` 增加同集群管理端口入口基线：四个管理服务默认拒绝入站；controlplane 8080 允许 console、gateway、modelregistry、pipeline、adapter、observability；modelregistry 8081 允许 console、controlplane、pipeline；adapter 8082 仅 controlplane；pipeline 8086 仅 console。所有来源仅同命名空间 Pod，`app: console` 指受信任的控制台反向代理，不是浏览器。应用前确认这些实际标签；跨 namespace 的入口控制器、远端 agent、远端控制面和 Prometheus 监控需要针对真实来源单独添加最小策略。当前不自动放行外部地址。
+
+这些清单不限制平台 egress，也不能按 HTTP 路径隔离同端口的用户/内部接口。gateway 的公开 OpenAI 入口与管理接口共用 8083，仍依赖 HTTP 鉴权和可信入口代理配置；远端连接必须配合 TLS。清单仅完成本地结构和允许/拒绝矩阵测试，未应用到用户集群；不能据此标记整体网络隔离完成。
+
 `GET /metrics` 当前仍为无 HTTP 鉴权的 Prometheus exporter；必须依赖上述 CNI 网络隔离，不能直接公开该端口。此策略未验证真实网络执行，不能据 YAML 存在宣称隔离验收通过。跨集群通信还需 TLS、网络来源限制和凭据运维。
 
 ## 测试与未完成项

@@ -7,6 +7,7 @@ set -euo pipefail
 CP=http://127.0.0.1:8080
 MR=http://127.0.0.1:8081
 GW=http://127.0.0.1:8083
+PIPELINE=http://127.0.0.1:8086
 
 log() { echo -e "\n\033[1;36m=== $* ===\033[0m"; }
 fail() { echo -e "\033[1;31mFAIL: $*\033[0m"; exit 1; }
@@ -83,8 +84,18 @@ for v in d.get('data',[]):
     if v['version']=='1.0': print(v['id']); break
 " 2>/dev/null)
 fi
-curl -s -X POST "$MR/api/v1/versions/$VID/validate" >/dev/null 2>&1
-curl -s -X POST "$MR/api/v1/versions/$VID/release" >/dev/null 2>&1
+STATUS=$(curl -sf "$MR/api/v1/versions/$VID" | json_field '["data"]["status"]')
+if [ "$STATUS" != "RELEASED" ]; then
+  RELEASE=$(curl -sf -X POST "$PIPELINE/api/v1/releases" -H 'Content-Type: application/json' \
+    -d "{\"modelVersionId\":\"$VID\",\"tenantId\":\"default\",\"operator\":\"contract\"}")
+  RELEASE_ID=$(echo "$RELEASE" | json_field '["data"]["id"]')
+  RELEASE_STATUS=$(echo "$RELEASE" | json_field '["data"]["status"]')
+  [ "$RELEASE_STATUS" = "PENDING_APPROVAL" ] || fail "发布门禁未通过: $RELEASE_STATUS"
+  APPROVAL=$(curl -sf -X POST "$PIPELINE/api/v1/releases/$RELEASE_ID/approval" -H 'Content-Type: application/json' \
+    -d '{"approver":"contract-admin","approved":true}')
+  [ "$(echo "$APPROVAL" | json_field '["data"]["status"]')" = "RELEASED" ] || fail "发布审批失败"
+fi
+[ "$(curl -sf "$MR/api/v1/versions/$VID" | json_field '["data"]["status"]')" = "RELEASED" ] || fail "版本未发布"
 pass "模型版本已就绪（VALIDATED → RELEASED）"
 
 # 3.2 创建部署 → 非终态

@@ -112,6 +112,7 @@ type registerRouteReq struct {
 	Endpoint       string `json:"endpoint"`
 	TenantID       string `json:"tenantId"`
 	DeploymentID   string `json:"deploymentId"`
+	ClusterID      string `json:"clusterId"`
 	StableEndpoint string `json:"stableEndpoint"`
 	CanaryEndpoint string `json:"canaryEndpoint"`
 	RolloutStatus  string `json:"rolloutStatus"`
@@ -129,6 +130,7 @@ func (s *Server) handleRegisterRoute(w http.ResponseWriter, r *http.Request) {
 		Endpoint:       req.Endpoint,
 		TenantID:       req.TenantID,
 		DeploymentID:   req.DeploymentID,
+		ClusterID:      req.ClusterID,
 		StableEndpoint: req.StableEndpoint,
 		CanaryEndpoint: req.CanaryEndpoint,
 		RolloutStatus:  req.RolloutStatus,

@@ -92,7 +92,7 @@ func setupRouteAndKey(t *testing.T, routes *router.Table, keys *auth.Manager, up
 
 func TestRegisterRouteKeepsRolloutMetadataWithoutWeighting(t *testing.T) {
 	h, _, routes, _ := newTestGateway(t)
-	body := `{"model":"qwen","modelId":"m1","endpoint":"http://qwen.tenant.svc","tenantId":"t1","deploymentId":"d1","stableEndpoint":"http://qwen-stable.tenant.svc","canaryEndpoint":"http://qwen-canary.tenant.svc","rolloutStatus":"Progressing"}`
+	body := `{"model":"qwen","modelId":"m1","endpoint":"http://qwen.tenant.svc","tenantId":"t1","deploymentId":"d1","clusterId":"gpu-west","stableEndpoint":"http://qwen-stable.tenant.svc","canaryEndpoint":"http://qwen-canary.tenant.svc","rolloutStatus":"Progressing"}`
 	req := httptest.NewRequest(http.MethodPost, "/internal/routes", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -103,11 +103,38 @@ func TestRegisterRouteKeepsRolloutMetadataWithoutWeighting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if route.Endpoint != "http://qwen.tenant.svc" || route.StableEndpoint == "" || route.CanaryEndpoint == "" || route.RolloutStatus != "Progressing" {
+	if route.Endpoint != "http://qwen.tenant.svc" || route.ClusterID != "gpu-west" || route.StableEndpoint == "" || route.CanaryEndpoint == "" || route.RolloutStatus != "Progressing" {
 		t.Fatalf("rollout metadata lost: %+v", route)
 	}
 	if route.Endpoint == route.StableEndpoint || route.Endpoint == route.CanaryEndpoint {
 		t.Fatalf("gateway must keep Istio entry endpoint: %+v", route)
+	}
+}
+
+func TestGatewayForwardsToClusterIngressPath(t *testing.T) {
+	requested := make(chan string, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requested <- r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer upstream.Close()
+	h, _, routes, keys := newTestGateway(t)
+	key, _ := setupRouteAndKey(t, routes, keys, upstream.URL+"/tenant-a/qwen")
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"qwen-demo","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer "+key)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("gateway response=%d body=%s", rec.Code, rec.Body.String())
+	}
+	select {
+	case path := <-requested:
+		if path != "/tenant-a/qwen/v1/chat/completions" {
+			t.Fatalf("wrong cluster ingress path: %s", path)
+		}
+	default:
+		t.Fatal("gateway did not call cluster ingress")
 	}
 }
 

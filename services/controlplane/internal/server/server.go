@@ -69,6 +69,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/logout", s.handleLogout)
 	mux.HandleFunc("POST /api/v1/auth/introspect", s.handleIntrospect)
 	mux.HandleFunc("POST /internal/notebooks/introspect", s.handleNotebookIntrospect)
+	mux.HandleFunc("GET /internal/resources/gpus", s.handleInternalGPUs)
 	mux.HandleFunc("POST /api/v1/notebooks/hub-token", s.handleNotebookHubToken)
 	mux.HandleFunc("GET /api/v1/notebooks/workspace", s.handleNotebookWorkspace)
 	mux.HandleFunc("POST /api/v1/notebooks/workspace", s.handleNotebookWorkspace)
@@ -466,6 +467,10 @@ func (s *Server) authRequired(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		if r.Method == http.MethodGet && r.URL.Path == "/internal/resources/gpus" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v1/clusters/") && strings.HasSuffix(r.URL.Path, "/heartbeat") {
 			next.ServeHTTP(w, r)
 			return
@@ -829,9 +834,13 @@ func (s *Server) handleDeleteDeployment(w http.ResponseWriter, r *http.Request) 
 
 // handleDeploymentMetrics 指标查询：转发到 observability；未配置时返回占位。
 func (s *Server) handleDeploymentMetrics(w http.ResponseWriter, r *http.Request) {
-	_, err := s.deployments.GetDeployment(r.PathValue("id"))
+	d, err := s.deployments.GetDeployment(r.PathValue("id"))
 	if err != nil {
 		apitypes.WriteResult(w, r, nil, err)
+		return
+	}
+	if !canAccessTenant(r.Context(), d.TenantID) {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrNotFound, "部署不存在"))
 		return
 	}
 	// 已配置 observability：转发真实指标
@@ -857,6 +866,14 @@ func (s *Server) handleDeploymentMetrics(w http.ResponseWriter, r *http.Request)
 }
 
 // ---- 资源 ----
+
+func (s *Server) handleInternalGPUs(w http.ResponseWriter, r *http.Request) {
+	if s.identity == nil || s.identity.AuthenticateService(platformauth.BearerToken(r), "observability") != nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "需要观测服务身份"))
+		return
+	}
+	s.handleListGPUs(w, r)
+}
 
 func (s *Server) handleListGPUs(w http.ResponseWriter, r *http.Request) {
 	gpuType := r.URL.Query().Get("gpuType")

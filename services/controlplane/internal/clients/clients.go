@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"kk-infra/lib/apitypes"
+	platformauth "kk-infra/lib/auth"
 	"kk-infra/lib/domain"
 	"kk-infra/lib/errcode"
 	"kk-infra/services/controlplane/internal/clusters"
@@ -19,8 +20,14 @@ import (
 
 // HTTPClient 统一 HTTP 客户端
 type HTTPClient struct {
-	baseURL string
-	http    *http.Client
+	baseURL                        string
+	http                           *http.Client
+	serviceSecret, serviceAudience string
+}
+
+func (c *HTTPClient) SetServiceIdentity(secret, audience string) {
+	c.serviceSecret, c.serviceAudience = secret, audience
+	c.http.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 }
 
 // NewHTTPClient 创建客户端
@@ -46,6 +53,13 @@ func (c *HTTPClient) do(ctx context.Context, method, path string, body interface
 		return errcode.Wrap(errcode.ErrInternal, "构造请求失败", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if c.serviceSecret != "" {
+		token, err := platformauth.IssueServiceToken(c.serviceSecret, "controlplane", c.serviceAudience)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {

@@ -92,7 +92,9 @@ func main() {
 		deployUse.SetClusterPlacement(clusterService, clients.NewClusterAdapterPool(clusterService, kubeClient))
 	}
 	if *gatewayURL != "" {
-		deployUse.SetGateway(clients.NewGatewayClient(*gatewayURL))
+		gatewayClient := clients.NewGatewayClient(*gatewayURL)
+		gatewayClient.SetServiceIdentity(*authSecret, "gateway")
+		deployUse.SetGateway(gatewayClient)
 	}
 	deployUse.SetDeploymentImage(*deploymentImage)
 	// R2-4：启用租户配额 + 审计
@@ -132,7 +134,9 @@ func main() {
 		deployUse.SetTenantState(identityService)
 	}
 	if *observabilityURL != "" {
-		srv.SetObservabilityClient(clients.NewObservabilityClient(*observabilityURL))
+		observabilityClient := clients.NewObservabilityClient(*observabilityURL)
+		observabilityClient.SetServiceIdentity(*authSecret, "observability")
+		srv.SetObservabilityClient(observabilityClient)
 	}
 
 	// Reconciler：每 3 秒对账一次

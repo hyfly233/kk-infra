@@ -49,6 +49,10 @@ func NewService(secret string) *Service {
 	return &Service{users: map[string]*User{}, byEmail: map[string]string{}, members: map[string]Member{}, refresh: map[string]*RefreshToken{}, tenants: map[string]bool{}, secret: secret, now: time.Now}
 }
 
+func (s *Service) AuthenticateService(token, caller string) error {
+	return platformauth.AuthenticateService(s.secret, token, "controlplane", caller)
+}
+
 // NewPostgresService 启动时恢复用户和租户成员；refresh token 在请求时再验证数据库状态。
 func NewPostgresService(db *sql.DB, secret string) (*Service, error) {
 	s := NewService(secret)

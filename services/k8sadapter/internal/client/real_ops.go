@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -37,15 +38,37 @@ func (c *RealKubeClient) ProvisionTenant(ctx context.Context, tenantID string) e
 	if err := c.ensure(ctx, "/api/v1/namespaces/"+ns+"/resourcequotas/tenant-default", "/api/v1/namespaces/"+ns+"/resourcequotas", map[string]interface{}{"apiVersion": "v1", "kind": "ResourceQuota", "metadata": map[string]interface{}{"name": "tenant-default", "namespace": ns}, "spec": map[string]interface{}{"hard": map[string]string{"pods": "100", "requests.cpu": "100", "requests.memory": "256Gi"}}}); err != nil {
 		return err
 	}
-	if err := c.ensure(ctx, "/apis/networking.k8s.io/v1/namespaces/"+ns+"/networkpolicies/notebook-access", "/apis/networking.k8s.io/v1/namespaces/"+ns+"/networkpolicies", map[string]interface{}{
+	notebookPolicy := map[string]interface{}{
 		"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": map[string]interface{}{"name": "notebook-access", "namespace": ns},
 		"spec": map[string]interface{}{
 			"podSelector": map[string]interface{}{"matchLabels": map[string]string{"carrot.ai/workload": "notebook"}}, "policyTypes": []string{"Ingress", "Egress"},
 			"ingress": []map[string]interface{}{{"from": []map[string]interface{}{{"namespaceSelector": map[string]interface{}{"matchLabels": map[string]string{"kubernetes.io/metadata.name": "jupyterhub"}}}}}},
-			"egress":  []map[string]interface{}{{"to": []map[string]interface{}{{"namespaceSelector": map[string]interface{}{"matchLabels": map[string]string{"kubernetes.io/metadata.name": "kube-system"}}}}, "ports": []map[string]interface{}{{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}}}},
+			"egress": []map[string]interface{}{
+				{"to": []map[string]interface{}{{"namespaceSelector": map[string]interface{}{"matchLabels": map[string]string{"kubernetes.io/metadata.name": "kube-system"}}}}, "ports": []map[string]interface{}{{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}}},
+				{"to": []map[string]interface{}{{"namespaceSelector": map[string]interface{}{"matchLabels": map[string]string{"kubernetes.io/metadata.name": "jupyterhub"}}, "podSelector": map[string]interface{}{"matchLabels": map[string]string{"app": "jupyterhub"}}}}, "ports": []map[string]interface{}{{"protocol": "TCP", "port": 8081}}},
+			},
 		},
-	}); err != nil {
+	}
+	policyPath := "/apis/networking.k8s.io/v1/namespaces/" + ns + "/networkpolicies/notebook-access"
+	var ignored interface{}
+	method, path := http.MethodPatch, policyPath
+	if err := c.do(ctx, http.MethodGet, policyPath, nil, &ignored); err == ErrNotFound {
+		method, path = http.MethodPost, "/apis/networking.k8s.io/v1/namespaces/"+ns+"/networkpolicies"
+	} else if err != nil {
 		return err
+	}
+	if err := c.do(ctx, method, path, notebookPolicy, &ignored); err != nil {
+		return err
+	}
+	if c.volcanoEnabled {
+		queue := volcanoQueueName(c.volcanoQueuePrefix, tenantID)
+		if err := c.ensure(ctx, "/apis/scheduling.volcano.sh/v1beta1/queues/"+queue, "/apis/scheduling.volcano.sh/v1beta1/queues", map[string]interface{}{
+			"apiVersion": "scheduling.volcano.sh/v1beta1", "kind": "Queue",
+			"metadata": map[string]interface{}{"name": queue, "labels": map[string]string{"carrot.ai/tenant-id": tenantID, "carrot.ai/managed-by": "carrot"}},
+			"spec":     map[string]interface{}{"weight": 1, "reclaimable": true},
+		}); err != nil {
+			return err
+		}
 	}
 	return c.ensure(ctx, "/apis/networking.k8s.io/v1/namespaces/"+ns+"/networkpolicies/default-deny", "/apis/networking.k8s.io/v1/namespaces/"+ns+"/networkpolicies", map[string]interface{}{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": map[string]interface{}{"name": "default-deny", "namespace": ns}, "spec": map[string]interface{}{"podSelector": map[string]interface{}{}, "policyTypes": []string{"Ingress", "Egress"}}})
 }
@@ -89,9 +112,31 @@ type nodeList struct {
 // 真实节点上有 nvidia.com/gpu 资源时读取；无 GPU 集群（Docker Desktop）
 // 使用虚拟 GPU 池，保证平台闭环可验证。
 func (c *RealKubeClient) ListGPUNodes(ctx context.Context) ([]domain.GPUResource, error) {
+	return c.listGPUCapacity(ctx, nil)
+}
+
+// ListGPUCapacitySnapshot derives totals and attribution from the same Pod list.
+// Node and Pod informer stores are not an atomic API-server snapshot.
+func (c *RealKubeClient) ListGPUCapacitySnapshot(ctx context.Context) ([]domain.GPUResource, []domain.DeploymentGPUObservation, error) {
+	var observations []domain.DeploymentGPUObservation
+	nodes, err := c.listGPUCapacity(ctx, &observations)
+	return nodes, observations, err
+}
+
+func (c *RealKubeClient) listGPUCapacity(ctx context.Context, observations *[]domain.DeploymentGPUObservation) ([]domain.GPUResource, error) {
 	var out []domain.GPUResource
 	var list nodeList
-	if err := c.do(ctx, "GET", "/api/v1/nodes", nil, &list); err != nil {
+	var err error
+	if c.gpuWatch != nil {
+		// A live API probe also catches a silently disconnected watch promptly.
+		err = c.do(ctx, "GET", "/version", nil, nil)
+		if err == nil {
+			err = c.gpuWatch.decode(true, &list)
+		}
+	} else {
+		err = c.do(ctx, "GET", "/api/v1/nodes", nil, &list)
+	}
+	if err != nil {
 		return nil, fmt.Errorf("查询节点失败: %w", err)
 	}
 	// 统计真实 GPU
@@ -100,9 +145,13 @@ func (c *RealKubeClient) ListGPUNodes(ctx context.Context) ([]domain.GPUResource
 	for _, n := range list.Items {
 		if parseInt(n.Status.Allocatable["nvidia.com/gpu"]) > 0 {
 			var err error
-			usedByNode, err = c.gpuRequestsByNode(ctx)
+			var assigned []domain.DeploymentGPUObservation
+			usedByNode, assigned, err = c.gpuRequestSnapshot(ctx)
 			if err != nil {
 				return nil, err
+			}
+			if observations != nil {
+				*observations = assigned
 			}
 			break
 		}
@@ -139,6 +188,20 @@ func (c *RealKubeClient) ListGPUNodes(ctx context.Context) ([]domain.GPUResource
 				Health:      health,
 			})
 		}
+	}
+	if observations != nil {
+		byNode := map[string]string{}
+		for _, node := range out {
+			byNode[node.NodeName] = node.GPUType
+		}
+		filtered := []domain.DeploymentGPUObservation{}
+		for _, assigned := range *observations {
+			if gpuType := byNode[assigned.NodeName]; gpuType != "" {
+				assigned.GPUType = gpuType
+				filtered = append(filtered, assigned)
+			}
+		}
+		*observations = filtered
 	}
 	// 无真实 GPU 时使用虚拟池
 	if !realFound && len(c.virtualGPUs) > 0 {
@@ -185,8 +248,9 @@ func (c *RealKubeClient) NodeGPUCapacity(ctx context.Context, gpuType string) (t
 type deploymentList struct {
 	Items []struct {
 		Metadata struct {
-			Name   string            `json:"name"`
-			Labels map[string]string `json:"labels"`
+			Namespace string            `json:"namespace"`
+			Name      string            `json:"name"`
+			Labels    map[string]string `json:"labels"`
 		} `json:"metadata"`
 		Spec struct {
 			Replicas int32 `json:"replicas"`
@@ -439,6 +503,7 @@ func (c *RealKubeClient) GetDeployment(ctx context.Context, name, namespace stri
 	}
 	return &DeploymentResult{
 		DeploymentID:   dep.Metadata.Labels["carrot.ai/deployment-id"],
+		Namespace:      ns,
 		Name:           name,
 		Status:         st,
 		Pods:           pods,
@@ -463,15 +528,32 @@ func (c *RealKubeClient) ListDeployments(ctx context.Context, namespace string) 
 	if c.progressiveEnabled {
 		path = "/apis/argoproj.io/v1alpha1/namespaces/" + ns + "/rollouts?labelSelector=" + labelSelector
 	}
+	if ns == "*" {
+		path = "/apis/apps/v1/deployments?labelSelector=" + labelSelector
+		if c.progressiveEnabled {
+			path = "/apis/argoproj.io/v1alpha1/rollouts?labelSelector=" + labelSelector
+		}
+	}
 	if err := c.do(ctx, "GET", path, nil, &list); err != nil {
 		return nil, fmt.Errorf("扫描部署失败: %w", err)
 	}
 	out := make([]*DeploymentResult, 0, len(list.Items))
 	for _, item := range list.Items {
-		res, err := c.GetDeployment(ctx, item.Metadata.Name, ns)
-		if err == nil {
-			out = append(out, res)
+		itemNamespace := ns
+		if ns == "*" {
+			itemNamespace = item.Metadata.Namespace
 		}
+		if itemNamespace == "" {
+			return nil, fmt.Errorf("listed deployment has no namespace")
+		}
+		res, err := c.GetDeployment(ctx, item.Metadata.Name, itemNamespace)
+		if err == ErrNotFound {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, res)
 	}
 	return out, nil
 }
@@ -524,36 +606,102 @@ func (c *RealKubeClient) RestartDeployment(ctx context.Context, name, namespace 
 	return c.GetDeployment(ctx, name, ns)
 }
 
-// DeleteDeployment 幂等删除 Deployment + Service
+// DeleteDeployment only succeeds after controllers, dependents and auxiliary
+// resources have disappeared. A DELETE acknowledgement alone cannot free quota.
 func (c *RealKubeClient) DeleteDeployment(ctx context.Context, name, namespace string) error {
+	return c.deleteDeployment(ctx, name, namespace, "")
+}
+
+func (c *RealKubeClient) DeleteManagedDeployment(ctx context.Context, name, namespace, deploymentID string) error {
+	if deploymentID == "" {
+		return fmt.Errorf("deployment identity required")
+	}
+	return c.deleteDeployment(ctx, name, namespace, deploymentID)
+}
+
+func (c *RealKubeClient) deleteDeployment(ctx context.Context, name, namespace, deploymentID string) error {
 	ns := namespace
 	if ns == "" {
 		ns = c.namespace
 	}
 	// Deployment 不存在视为成功（幂等）
-	path, resourceName := "/apis/apps/v1/namespaces/"+ns+"/deployments/"+name, "Deployment"
+	path := "/apis/apps/v1/namespaces/" + ns + "/deployments/" + name
 	if c.progressiveEnabled {
 		path = "/apis/argoproj.io/v1alpha1/namespaces/" + ns + "/rollouts/" + name
-		resourceName = "Rollout"
 	}
-	err := c.do(ctx, "DELETE", path, nil, nil)
-	if err != nil && err != ErrNotFound {
-		return fmt.Errorf("删除 %s 失败: %w", resourceName, err)
-	}
-	// Service 一并删除（忽略不存在）
-	_ = c.do(ctx, "DELETE", "/api/v1/namespaces/"+ns+"/services/"+name, nil, nil)
+	paths := []string{"/api/v1/namespaces/" + ns + "/services/" + name}
 	if c.progressiveEnabled {
-		_ = c.do(ctx, "DELETE", "/api/v1/namespaces/"+ns+"/services/"+name+"-stable", nil, nil)
-		_ = c.do(ctx, "DELETE", "/api/v1/namespaces/"+ns+"/services/"+name+"-canary", nil, nil)
-		_ = c.do(ctx, "DELETE", "/apis/networking.istio.io/v1beta1/namespaces/"+ns+"/virtualservices/"+name+"-traffic", nil, nil)
-		_ = c.do(ctx, "DELETE", "/apis/argoproj.io/v1alpha1/namespaces/"+ns+"/analysistemplates/"+name+"-analysis", nil, nil)
+		paths = append(paths, "/api/v1/namespaces/"+ns+"/services/"+name+"-stable", "/api/v1/namespaces/"+ns+"/services/"+name+"-canary",
+			"/apis/networking.istio.io/v1beta1/namespaces/"+ns+"/virtualservices/"+name+"-traffic", "/apis/argoproj.io/v1alpha1/namespaces/"+ns+"/analysistemplates/"+name+"-analysis")
 	}
-	_ = c.do(ctx, "DELETE", "/api/v1/namespaces/"+ns+"/secrets/"+name+"-artifact", nil, nil)
+	paths = append(paths, "/api/v1/namespaces/"+ns+"/secrets/"+name+"-artifact")
 	if c.kedaEnabled {
-		_ = c.do(ctx, "DELETE", "/apis/keda.sh/v1alpha1/namespaces/"+ns+"/scaledobjects/"+name, nil, nil)
+		paths = append(paths, "/apis/keda.sh/v1alpha1/namespaces/"+ns+"/scaledobjects/"+name)
 	}
 	if c.volcanoEnabled {
-		_ = c.do(ctx, "DELETE", "/apis/scheduling.volcano.sh/v1beta1/namespaces/"+ns+"/podgroups/"+name, nil, nil)
+		paths = append(paths, "/apis/scheduling.volcano.sh/v1beta1/namespaces/"+ns+"/podgroups/"+name)
+	}
+	allPaths := append([]string{path}, paths...)
+	uids := map[string]string{}
+	if deploymentID != "" {
+		// Validate every object before deleting any; pin UIDs against name reuse
+		// and late requests after a cancelled cleanup attempt.
+		for _, resource := range allPaths {
+			var object struct {
+				Metadata struct {
+					UID    string            `json:"uid"`
+					Labels map[string]string `json:"labels"`
+				} `json:"metadata"`
+			}
+			if err := c.do(ctx, "GET", resource, nil, &object); err != nil {
+				if err == ErrNotFound {
+					continue
+				}
+				return err
+			}
+			if object.Metadata.UID == "" || object.Metadata.Labels["carrot.ai/deployment-id"] != deploymentID || object.Metadata.Labels["carrot.ai/managed-by"] != "carrot" {
+				return fmt.Errorf("资源身份不匹配: %s", resource)
+			}
+			uids[resource] = object.Metadata.UID
+		}
+	}
+	for _, resource := range allPaths {
+		options := map[string]any{"apiVersion": "v1", "kind": "DeleteOptions"}
+		if resource == path {
+			options["propagationPolicy"] = "Foreground"
+		}
+		if deploymentID != "" {
+			uid, exists := uids[resource]
+			if !exists {
+				continue
+			}
+			options["preconditions"] = map[string]string{"uid": uid}
+		}
+		if err := c.do(ctx, "DELETE", resource, options, nil); err != nil && err != ErrNotFound {
+			return fmt.Errorf("删除关联资源 %s 失败: %w", resource, err)
+		}
+	}
+	// Query the API server, not informer caches, including terminating objects.
+	for _, resource := range append([]string{path}, paths...) {
+		var object map[string]any
+		if err := c.do(ctx, "GET", resource, nil, &object); err != ErrNotFound {
+			if err != nil {
+				return fmt.Errorf("确认资源删除 %s 失败: %w", resource, err)
+			}
+			return fmt.Errorf("资源仍在删除中: %s", resource)
+		}
+	}
+	selector := "?labelSelector=" + url.QueryEscape("app="+name)
+	for _, resource := range []string{"/apis/apps/v1/namespaces/" + ns + "/replicasets", "/api/v1/namespaces/" + ns + "/pods"} {
+		var list struct {
+			Items []json.RawMessage `json:"items"`
+		}
+		if err := c.do(ctx, "GET", resource+selector, nil, &list); err != nil {
+			return fmt.Errorf("确认残留资源 %s 失败: %w", resource, err)
+		}
+		if len(list.Items) != 0 {
+			return fmt.Errorf("仍有残留资源: %s", resource)
+		}
 	}
 	return nil
 }

@@ -34,6 +34,7 @@ type DeploymentSpec struct {
 
 // DeploymentResult 创建/查询结果
 type DeploymentResult struct {
+	Namespace      string                `json:"namespace"`
 	DeploymentID   string                `json:"deploymentId"`
 	Name           string                `json:"name"` // 部署名（R2-2 孤儿检测用）
 	Status         *k8s.DeploymentStatus `json:"status"`

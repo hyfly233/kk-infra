@@ -271,6 +271,7 @@ func (f *FakeKubeClient) GetDeployment(ctx context.Context, name, namespace stri
 	events := f.simulateEvents(name, namespace, stage, message)
 	endpoint := fmt.Sprintf("%s.%s.svc.cluster.local", name, namespace)
 	return &DeploymentResult{
+		Namespace:    namespace,
 		DeploymentID: spec.DeploymentID,
 		Name:         name,
 		Status:       &status,
@@ -332,17 +333,18 @@ func (f *FakeKubeClient) simulateEvents(name, namespace string, stage int, messa
 // ListDeployments 列出 Fake 集群中全部受管部署（R2-2）
 func (f *FakeKubeClient) ListDeployments(ctx context.Context, namespace string) ([]*DeploymentResult, error) {
 	f.mu.RLock()
-	var names []string
+	var keys []string
 	for k := range f.deploys {
 		parts := strings.SplitN(k, "/", 2)
-		if len(parts) == 2 && (namespace == "" || parts[0] == namespace) {
-			names = append(names, parts[1])
+		if len(parts) == 2 && (namespace == "" || namespace == "*" || parts[0] == namespace) {
+			keys = append(keys, k)
 		}
 	}
 	f.mu.RUnlock()
-	out := make([]*DeploymentResult, 0, len(names))
-	for _, n := range names {
-		res, err := f.GetDeployment(ctx, n, namespace)
+	out := make([]*DeploymentResult, 0, len(keys))
+	for _, key := range keys {
+		parts := strings.SplitN(key, "/", 2)
+		res, err := f.GetDeployment(ctx, parts[1], parts[0])
 		if err == nil {
 			out = append(out, res)
 		}
@@ -384,6 +386,19 @@ func (f *FakeKubeClient) RestartDeployment(ctx context.Context, name, namespace 
 }
 
 // DeleteDeployment 幂等删除
+func (f *FakeKubeClient) DeleteManagedDeployment(ctx context.Context, name, namespace, deploymentID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if deploymentID == "" {
+		return fmt.Errorf("deployment identity required")
+	}
+	if d, ok := f.deploys[key(name, namespace)]; ok && d.Spec.DeploymentID != deploymentID {
+		return fmt.Errorf("deployment identity mismatch")
+	}
+	delete(f.deploys, key(name, namespace))
+	return nil
+}
+
 func (f *FakeKubeClient) DeleteDeployment(ctx context.Context, name, namespace string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

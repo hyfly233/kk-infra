@@ -11,7 +11,7 @@ func TestRenderDeploymentArtifactInitContainer(t *testing.T) {
 	spec := &DeploymentSpec{
 		DeploymentID: "d1", Name: "qwen", Namespace: "tenant-t1", Replicas: 1,
 		Resource: domain.Resource{GPUType: "A100", GPUCount: 1, MemoryMB: 1024},
-		Labels:   map[string]string{"carrot.ai/deployment-id": "d1"}, ModelPath: "/models/qwen",
+		Labels:   map[string]string{"carrot.ai/deployment-id": "d1", "carrot.ai/template-generation": "7"}, ModelPath: "/models/qwen",
 		ArtifactURI: "s3://models/qwen.tar", ArtifactDigest: "sha256:abcdef",
 	}
 	manifests, err := renderDeploymentManifests(spec, spec.Namespace, "vllm:test", true, artifactStorageConfig{
@@ -24,6 +24,12 @@ func TestRenderDeploymentArtifactInitContainer(t *testing.T) {
 		t.Fatalf("artifact Secret missing: %+v", manifests.Secret)
 	}
 	pod := manifests.Deployment.Spec.Template.Spec
+	if manifests.Deployment.Spec.Template.Metadata.Labels["carrot.ai/template-generation"] != "7" {
+		t.Fatal("template generation label lost")
+	}
+	if _, ok := manifests.Deployment.Spec.Selector.MatchLabels["carrot.ai/template-generation"]; ok {
+		t.Fatal("generation must not enter immutable selector")
+	}
 	if len(pod.InitContainers) != 1 || len(pod.Volumes) != 1 {
 		t.Fatalf("artifact init resources missing: %+v", pod)
 	}

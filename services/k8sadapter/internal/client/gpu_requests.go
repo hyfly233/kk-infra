@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+
+	"kk-infra/lib/domain"
 )
 
 type gpuContainer struct {
@@ -32,8 +34,17 @@ func (c gpuContainer) request() (int32, error) {
 // Count all assigned, non-terminal Pods, including other tenants and terminating
 // Pods. An init container's peak overlaps previously started native sidecars.
 func (c *RealKubeClient) gpuRequestsByNode(ctx context.Context) (map[string]int32, error) {
+	used, _, err := c.gpuRequestSnapshot(ctx)
+	return used, err
+}
+
+func (c *RealKubeClient) gpuRequestSnapshot(ctx context.Context) (map[string]int32, []domain.DeploymentGPUObservation, error) {
 	var pods struct {
 		Items []struct {
+			Metadata struct {
+				Namespace string            `json:"namespace"`
+				Labels    map[string]string `json:"labels"`
+			} `json:"metadata"`
 			Spec struct {
 				NodeName       string         `json:"nodeName"`
 				Containers     []gpuContainer `json:"containers"`
@@ -44,10 +55,17 @@ func (c *RealKubeClient) gpuRequestsByNode(ctx context.Context) (map[string]int3
 			} `json:"status"`
 		} `json:"items"`
 	}
-	if err := c.do(ctx, "GET", "/api/v1/pods", nil, &pods); err != nil {
-		return nil, fmt.Errorf("query GPU Pod requests: %w", err)
+	var err error
+	if c.gpuWatch != nil {
+		err = c.gpuWatch.decode(false, &pods)
+	} else {
+		err = c.do(ctx, "GET", "/api/v1/pods", nil, &pods)
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("query GPU Pod requests: %w", err)
 	}
 	used := map[string]int32{}
+	observations := []domain.DeploymentGPUObservation{}
 	for _, pod := range pods.Items {
 		if pod.Spec.NodeName == "" || pod.Status.Phase == "Succeeded" || pod.Status.Phase == "Failed" {
 			continue
@@ -56,21 +74,34 @@ func (c *RealKubeClient) gpuRequestsByNode(ctx context.Context) (map[string]int3
 		for _, container := range pod.Spec.Containers {
 			n, err := container.request()
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			app += n
 		}
 		for _, container := range pod.Spec.InitContainers {
 			n, err := container.request()
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			peak = max(peak, sidecars+n)
 			if container.RestartPolicy == "Always" {
 				sidecars += n
 			}
 		}
-		used[pod.Spec.NodeName] += max(app+sidecars, peak)
+		count := max(app+sidecars, peak)
+		used[pod.Spec.NodeName] += count
+		labels := pod.Metadata.Labels
+		if count > 0 && labels["carrot.ai/managed-by"] == "carrot" && labels["carrot.ai/deployment-id"] != "" && labels["carrot.ai/tenant-id"] != "" && pod.Metadata.Namespace != "" {
+			observation := domain.DeploymentGPUObservation{DeploymentID: labels["carrot.ai/deployment-id"], TenantID: labels["carrot.ai/tenant-id"], Namespace: pod.Metadata.Namespace, NodeName: pod.Spec.NodeName, GPUCount: count}
+			if value, present := labels["carrot.ai/template-generation"]; present {
+				generation, err := strconv.ParseInt(value, 10, 64)
+				if err != nil || generation < 0 {
+					return nil, nil, fmt.Errorf("invalid template generation label %q", value)
+				}
+				observation.TemplateGeneration = &generation
+			}
+			observations = append(observations, observation)
+		}
 	}
-	return used, nil
+	return used, observations, nil
 }

@@ -20,13 +20,14 @@ import (
 )
 
 // RealKubeClient 真实 Kubernetes 客户端。
-// 直接调用 K8s REST API（不引入 client-go 重依赖），
-// 通过 kubeconfig 认证。无 GPU 节点时可用虚拟 GPU 池（配置注入）做资源校验。
+// 工作负载使用 REST API，GPU 容量通过 client-go informer 缓存采集。
+// 通过 kubeconfig 认证。无 GPU 节点时可用虚拟 GPU 池做资源校验。
 type RealKubeClient struct {
 	baseURL    string // https://<apiserver>
 	httpClient *http.Client
 	namespace  string // 默认命名空间（部署请求未指定时）
 	token      string // bearer token（kubeconfig）
+	gpuWatch   *gpuWatch
 	// 虚拟 GPU 池配置（Docker Desktop 等无 GPU 环境使用）
 	virtualGPUs []FakeNodeConfig
 	// 部署镜像（vLLM 或 mock；由环境变量注入便于无 GPU 验证）

@@ -5,20 +5,21 @@ import "time"
 // ModelDeployment 模型服务部署，是平台的核心资源对象。
 // 生命周期由状态机管理，所有字段均可序列化用于持久化。
 type ModelDeployment struct {
-	ID             string    `json:"id"`             // 部署 ID（幂等键）
-	Name           string    `json:"name"`           // 服务名称（namespace 内唯一）
-	ModelID        string    `json:"modelId"`        // 所属模型
-	ModelVersionID string    `json:"modelVersionId"` // 引用的模型版本
-	ModelName      string    `json:"modelName"`      // 冗余模型名，便于展示与路由
-	ModelVersion   string    `json:"modelVersion"`   // 冗余版本号
-	TenantID       string    `json:"tenantId"`       // 租户
-	Namespace      string    `json:"namespace"`      // K8s Namespace
-	Replicas       int32     `json:"replicas"`       // 期望副本数
-	Resource       Resource  `json:"resource"`       // 单副本资源规格
-	Runtime        string    `json:"runtime"`        // 运行时，如 vLLM
-	ServingMode    string    `json:"servingMode"`    // unified / disaggregated
-	StartupArgs    []string  `json:"startupArgs"`    // 启动参数（vLLM extra args）
-	Endpoint       string    `json:"endpoint"`       // 服务成功后返回的 API Endpoint
+	ID             string    `json:"id"`                  // 部署 ID（幂等键）
+	Name           string    `json:"name"`                // 服务名称（namespace 内唯一）
+	ModelID        string    `json:"modelId"`             // 所属模型
+	ModelVersionID string    `json:"modelVersionId"`      // 引用的模型版本
+	ModelName      string    `json:"modelName"`           // 冗余模型名，便于展示与路由
+	ModelVersion   string    `json:"modelVersion"`        // 冗余版本号
+	TenantID       string    `json:"tenantId"`            // 租户
+	Namespace      string    `json:"namespace"`           // K8s Namespace
+	ClusterID      string    `json:"clusterId,omitempty"` // 放置到的集群
+	Replicas       int32     `json:"replicas"`            // 期望副本数
+	Resource       Resource  `json:"resource"`            // 单副本资源规格
+	Runtime        string    `json:"runtime"`             // 运行时，如 vLLM
+	ServingMode    string    `json:"servingMode"`         // unified / disaggregated
+	StartupArgs    []string  `json:"startupArgs"`         // 启动参数（vLLM extra args）
+	Endpoint       string    `json:"endpoint"`            // 服务成功后返回的 API Endpoint
 	StableEndpoint string    `json:"stableEndpoint,omitempty"`
 	CanaryEndpoint string    `json:"canaryEndpoint,omitempty"`
 	RolloutStatus  string    `json:"rolloutStatus,omitempty"`

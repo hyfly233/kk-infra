@@ -22,6 +22,7 @@ import (
 func main() {
 	addr := flag.String("addr", ":8081", "监听地址")
 	storage := flag.String("storage", "memory", "存储后端: memory | postgres")
+	authSecret := flag.String("auth-secret", os.Getenv("CARROT_AUTH_SECRET"), "用户/服务 JWT 密钥，空值仅供不安全开发模式")
 	s3Endpoint := flag.String("s3-endpoint", "", "S3/MinIO endpoint；为空时使用开发校验器")
 	s3Secure := flag.Bool("s3-secure", false, "S3 endpoint 使用 TLS")
 	pipelineToken := flag.String("pipeline-token", "", "发布流水线共享令牌；为空仅用于本地兼容")
@@ -62,6 +63,10 @@ func main() {
 	}
 	registry := biz.NewRegistry(repo, verifier)
 	srv := server.NewServer(registry, logger)
+	srv.SetAuthSecret(*authSecret)
+	if *authSecret == "" {
+		logger.Warn("modelregistry 鉴权未启用，仅限可信本地开发环境")
+	}
 	srv.SetPipelineToken(*pipelineToken)
 
 	httpSrv := &http.Server{

@@ -83,12 +83,22 @@ PIDS+=($!)
 
 # ---------- 3. 等待就绪 ----------
 log "等待全部服务就绪"
+management_code=200
+if [ -n "${CARROT_AUTH_SECRET:-}" ]; then
+  management_code=401
+  log "认证已启用：管理接口返回 401 仅确认 HTTP 服务可达，不代表依赖健康"
+fi
+management_ready() {
+  local status
+  status=$(curl -s --max-time 2 -o /dev/null -w "%{http_code}" "$1" 2>/dev/null || true)
+  [ "$status" = "$management_code" ]
+}
 for i in $(seq 1 30); do
   ok=0
-  curl -sf http://127.0.0.1:8081/api/v1/models >/dev/null 2>&1 && ok=$((ok+1))
+  management_ready http://127.0.0.1:8081/api/v1/models && ok=$((ok+1))
   curl -sf http://127.0.0.1:8082/v1/resources/gpus >/dev/null 2>&1 && ok=$((ok+1))
-  curl -sf http://127.0.0.1:8080/api/v1/deployments >/dev/null 2>&1 && ok=$((ok+1))
-  curl -sf http://127.0.0.1:8084/api/v1/deployments/x/metrics >/dev/null 2>&1 && ok=$((ok+1))
+  management_ready http://127.0.0.1:8080/api/v1/deployments && ok=$((ok+1))
+  management_ready http://127.0.0.1:8084/api/v1/deployments/x/metrics && ok=$((ok+1))
   # gateway /v1/models 需要鉴权，401 即服务已就绪
   code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8083/v1/models 2>/dev/null || true)
   [ "$code" = "401" ] && ok=$((ok+1))

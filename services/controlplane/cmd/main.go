@@ -70,6 +70,7 @@ func main() {
 	}
 
 	modelClient := clients.NewModelRegistryClient(*modelRegistry)
+	modelClient.SetServiceIdentity(*authSecret, "modelregistry")
 	kubeClient := clients.NewK8sAdapterClient(*k8sAdapter)
 	var clusterService *clusters.Service
 	if encryptionKey := os.Getenv("CLUSTER_ENCRYPTION_KEY"); encryptionKey != "" {
@@ -88,6 +89,7 @@ func main() {
 	}
 
 	deployUse := biz.NewDeploymentUseCase(repo, modelClient, kubeClient)
+	deployUse.RequireModelTenant(*authSecret != "")
 	if clusterService != nil {
 		deployUse.SetClusterPlacement(clusterService, clients.NewClusterAdapterPool(clusterService, kubeClient))
 	}

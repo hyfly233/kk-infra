@@ -17,7 +17,8 @@ func registryClaims(r *http.Request) *platformauth.Claims {
 	c, _ := r.Context().Value(registryClaimsKey{}).(*platformauth.Claims)
 	return c
 }
-func (s *Server) SetAuthSecret(secret string) { s.authSecret = secret }
+func (s *Server) SetAuthSecret(secret string)                  { s.authSecret = secret }
+func (s *Server) SetUserVerifier(v *platformauth.UserVerifier) { s.userVerifier = v }
 
 func (s *Server) authRequired(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -36,7 +37,7 @@ func (s *Server) authRequired(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		c, err := platformauth.ParseAccessToken(s.authSecret, token, "controlplane")
+		c, err := s.userVerifier.Verify(r.Context(), token)
 		if err != nil || (c.TenantID == "" && c.Role != platformauth.RolePlatformAdmin) || (r.Method != http.MethodGet && c.Role == platformauth.RoleViewer) || strings.HasSuffix(r.URL.Path, "/release") {
 			apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "模型操作身份无效或权限不足"))
 			return

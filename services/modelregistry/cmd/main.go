@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	platformauth "kk-infra/lib/auth"
 	"kk-infra/lib/store"
 	"kk-infra/services/modelregistry/internal/artifact"
 	"kk-infra/services/modelregistry/internal/biz"
@@ -23,6 +24,7 @@ func main() {
 	addr := flag.String("addr", ":8081", "监听地址")
 	storage := flag.String("storage", "memory", "存储后端: memory | postgres")
 	authSecret := flag.String("auth-secret", os.Getenv("CARROT_AUTH_SECRET"), "用户/服务 JWT 密钥，空值仅供不安全开发模式")
+	controlplaneURL := flag.String("controlplane-url", "http://127.0.0.1:8080", "在线成员鉴权控制面地址")
 	s3Endpoint := flag.String("s3-endpoint", "", "S3/MinIO endpoint；为空时使用开发校验器")
 	s3Secure := flag.Bool("s3-secure", false, "S3 endpoint 使用 TLS")
 	pipelineToken := flag.String("pipeline-token", "", "发布流水线共享令牌；为空仅用于本地兼容")
@@ -64,6 +66,7 @@ func main() {
 	registry := biz.NewRegistry(repo, verifier)
 	srv := server.NewServer(registry, logger)
 	srv.SetAuthSecret(*authSecret)
+	srv.SetUserVerifier(platformauth.NewUserVerifier(*controlplaneURL, *authSecret, "modelregistry"))
 	if *authSecret == "" {
 		logger.Warn("modelregistry 鉴权未启用，仅限可信本地开发环境")
 	}

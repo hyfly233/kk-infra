@@ -15,6 +15,7 @@ import (
 
 // Server 模型注册 HTTP 服务
 type Server struct {
+	userVerifier  *platformauth.UserVerifier
 	registry      *biz.Registry
 	logger        *slog.Logger
 	pipelineToken string

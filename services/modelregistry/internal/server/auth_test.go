@@ -31,6 +31,7 @@ func TestModelRegistryEnforcesTenantOwnershipAndViewerRedaction(t *testing.T) {
 	}
 	s := NewServer(registry, slog.Default())
 	s.SetAuthSecret("secret")
+	s.SetUserVerifier(userVerifierFixture(t, "secret", "modelregistry"))
 	token := func(tenant string, role platformauth.Role) string {
 		value, _ := platformauth.IssueAccessToken("secret", "user", tenant, role, "controlplane", time.Now(), time.Minute)
 		return value
@@ -100,6 +101,7 @@ func TestModelRegistryServicePrivilegesAndReleaseGate(t *testing.T) {
 	version, _ := registry.CreateVersion(model.ID, &apitypes.CreateModelVersionRequest{Version: "v1", ArtifactURI: "s3://private/weights", GPUType: "A100", GPUCount: 1})
 	s := NewServer(registry, slog.Default())
 	s.SetAuthSecret("secret")
+	s.SetUserVerifier(userVerifierFixture(t, "secret", "modelregistry"))
 	cp, _ := platformauth.IssueServiceToken("secret", "controlplane", "modelregistry")
 	pipe, _ := platformauth.IssueServiceToken("secret", "pipeline", "modelregistry")
 	wrong, _ := platformauth.IssueServiceToken("secret", "pipeline", "gateway")

@@ -79,10 +79,11 @@ type DeploymentUseCase struct {
 	// 审计日志（R2-4，可为 nil 表示不记录）
 	audit *AuditUseCase
 	// gateway 可为 nil，供不启动推理网关的单元测试使用。
-	gateway         GatewayClient
-	tenants         TenantState
-	clusterKube     ClusterDeploymentClient
-	clusterSelector ClusterSelector
+	gateway            GatewayClient
+	tenants            TenantState
+	clusterKube        ClusterDeploymentClient
+	clusterSelector    ClusterSelector
+	requireModelTenant bool
 }
 
 // NewDeploymentUseCase 创建用例
@@ -112,6 +113,17 @@ func (uc *DeploymentUseCase) SetGateway(gateway GatewayClient) {
 	uc.gateway = gateway
 }
 func (uc *DeploymentUseCase) SetTenantState(tenants TenantState) { uc.tenants = tenants }
+func (uc *DeploymentUseCase) RequireModelTenant(enabled bool)    { uc.requireModelTenant = enabled }
+
+func (uc *DeploymentUseCase) modelTenantMatches(version *domain.ModelVersion, tenant string) bool {
+	if version == nil {
+		return false
+	}
+	if version.TenantID == "" {
+		return !uc.requireModelTenant
+	}
+	return version.TenantID == tenant
+}
 func (uc *DeploymentUseCase) SetClusterPlacement(selector ClusterSelector, kube ClusterDeploymentClient) {
 	uc.clusterSelector, uc.clusterKube = selector, kube
 }
@@ -178,8 +190,15 @@ func (uc *DeploymentUseCase) SetDeploymentImage(image string) {
 
 // CreateDeployment 创建部署（幂等：同名且未删除时返回同一部署；已删除同名允许重建）
 func (uc *DeploymentUseCase) CreateDeployment(ctx context.Context, req *apitypes.CreateDeploymentRequest) (*domain.ModelDeployment, error) {
+	tenantID := req.TenantID
+	if tenantID == "" {
+		tenantID = uc.defaultTenant
+	}
 	// 幂等：按名称查已存在部署（跳过已删除的，允许同名重建）
 	if existing, err := uc.repo.GetByName(req.Name); err == nil && existing.Status != domain.DeploymentStatusDeleted {
+		if existing.TenantID != tenantID {
+			return nil, errcode.New(errcode.ErrConflict, "部署名称已被占用")
+		}
 		return existing, nil
 	}
 
@@ -208,9 +227,8 @@ func (uc *DeploymentUseCase) CreateDeployment(ctx context.Context, req *apitypes
 	clusterID := ""
 
 	// 2. 校验资源配额（GPU 足够 + 租户配额）
-	tenantID := req.TenantID
-	if tenantID == "" {
-		tenantID = uc.defaultTenant
+	if !uc.modelTenantMatches(version, tenantID) {
+		return nil, errcode.New(errcode.ErrUnauthorized, "模型版本不属于目标租户或尚未归属")
 	}
 	if uc.tenants != nil && !uc.tenants.TenantActive(tenantID) {
 		return nil, errcode.New(errcode.ErrUnauthorized, "租户已禁用，不能创建部署")
@@ -345,6 +363,12 @@ func (uc *DeploymentUseCase) RebuildDeployment(ctx context.Context, id, targetCl
 	if d.ClusterID == "" || d.ClusterID == targetCluster || d.Status != domain.DeploymentStatusFailed || !strings.HasPrefix(d.Diagnostics, "目标集群不可用:") {
 		return nil, errcode.New(errcode.ErrIllegalState, "仅允许将目标集群故障导致的失败部署重建到其他集群")
 	}
+	if uc.requireModelTenant {
+		version, err := uc.models.GetVersion(ctx, d.ModelVersionID)
+		if err != nil || !uc.modelTenantMatches(version, d.TenantID) || !version.Deployable() {
+			return nil, errcode.New(errcode.ErrModelNotDeployable, "重建版本归属或可部署状态无法确认")
+		}
+	}
 	if uc.clusterSelector == nil {
 		return nil, errcode.New(errcode.ErrIllegalState, "集群放置服务未配置")
 	}
@@ -405,7 +429,7 @@ func (uc *DeploymentUseCase) RebuildDeployment(ctx context.Context, id, targetCl
 
 func (uc *DeploymentUseCase) submitToK8s(ctx context.Context, d *domain.ModelDeployment) {
 	version, err := uc.models.GetVersion(ctx, d.ModelVersionID)
-	if err != nil || !version.Deployable() {
+	if err != nil || !version.Deployable() || !uc.modelTenantMatches(version, d.TenantID) {
 		uc.failDeployment(d.ID, "模型 artifact 元数据不可用")
 		return
 	}
@@ -715,6 +739,9 @@ func (uc *DeploymentUseCase) UpgradeDeployment(ctx context.Context, id, newVersi
 	version, err := uc.models.GetVersion(ctx, newVersionID)
 	if err != nil {
 		return nil, errcode.Wrap(errcode.ErrModelVersionFound, "模型版本校验失败", err)
+	}
+	if !uc.modelTenantMatches(version, d.TenantID) {
+		return nil, errcode.New(errcode.ErrUnauthorized, "升级版本不属于部署租户或尚未归属")
 	}
 	if !version.Deployable() {
 		return nil, errcode.New(errcode.ErrModelNotDeployable,
@@ -1072,7 +1099,7 @@ func (uc *DeploymentUseCase) restoreLastStableRevision(ctx context.Context, d *d
 			continue
 		}
 		version, err := uc.models.GetVersion(ctx, revision.ModelVersionID)
-		if err != nil {
+		if err != nil || !uc.modelTenantMatches(version, d.TenantID) {
 			return
 		}
 		uc.updateDeployment(d.ID, func(current *domain.ModelDeployment) {

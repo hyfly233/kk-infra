@@ -201,7 +201,7 @@ func NewModelRegistryClient(baseURL string) *ModelRegistryClient {
 // GetVersion 按版本 ID 查询模型版本
 func (c *ModelRegistryClient) GetVersion(ctx context.Context, versionID string) (*domain.ModelVersion, error) {
 	var v domain.ModelVersion
-	if err := c.do(ctx, http.MethodGet, "/api/v1/versions/"+versionID, nil, &v); err != nil {
+	if err := c.do(ctx, http.MethodGet, "/api/v1/versions/"+url.PathEscape(versionID), nil, &v); err != nil {
 		return nil, err
 	}
 	return &v, nil

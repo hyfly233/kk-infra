@@ -94,4 +94,13 @@ func TestModelTenantBinaryLifecycle(t *testing.T) {
 		t.Fatal("Fake deployment never became RUNNING")
 	}
 	call(cp, "DELETE", "/api/v1/deployments/tenant-e2e", admin, "", 200)
+	// Real HTTP role changes invalidate the original administrator access token.
+	refreshToken := login["data"].(map[string]any)["refreshToken"].(string)
+	call(cp, "PUT", "/api/v1/tenants/tenant-a/members/admin", admin, `{"role":"viewer"}`, 200)
+	call(cp, "GET", "/api/v1/tenants/tenant-a/members", admin, "", 401)
+	fresh := call(cp, "POST", "/api/v1/auth/refresh", "", `{"refreshToken":"`+refreshToken+`"}`, 200)["data"].(map[string]any)
+	if fresh["role"] != "viewer" {
+		t.Fatalf("refresh retained old role: %+v", fresh)
+	}
+	call(cp, "GET", "/api/v1/tenants/tenant-a/members", fresh["accessToken"].(string), "", 401)
 }

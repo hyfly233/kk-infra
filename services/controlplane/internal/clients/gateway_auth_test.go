@@ -38,6 +38,14 @@ func TestGatewayBinaryAuthenticatedLifecycle(t *testing.T) {
 		t.Skip("isolated binaries not configured")
 	}
 	const secret = "local-gateway-e2e-secret"
+	cpURL := os.Getenv("GATEWAY_E2E_CP")
+	if cpURL == "" {
+		t.Fatal("controlplane required for online tenant checks")
+	}
+	cp := NewHTTPClient(cpURL)
+	if err := cp.do(context.Background(), http.MethodPost, "/api/v1/auth/bootstrap", map[string]string{"id": "admin", "email": "admin@example.test", "password": "Strong-password-123", "tenantId": "tenant-a"}, nil); err != nil {
+		t.Fatal(err)
+	}
 	c := NewGatewayClient(base)
 	c.SetServiceIdentity(secret, "gateway")
 	if err := c.RegisterRoute(context.Background(), "e2e-model", "m1", inference, "tenant-a", "d1", "", "", "", ""); err != nil {
@@ -114,6 +122,25 @@ func TestGatewayBinaryAuthenticatedLifecycle(t *testing.T) {
 	call("POST", "/api/v1/keys/"+issued.Data.ID+"/disable", other, "", 404)
 	call("POST", "/api/v1/keys/"+issued.Data.ID+"/disable", admin, "", 200)
 	call("GET", "/v1/models", issued.Data.Key, "", 403)
+	// Keep a second Key enabled: tenant disable must revoke inference independently.
+	activeKey := call("POST", "/api/v1/keys", admin, `{"tenantId":"tenant-a"}`, 200)
+	if err := json.Unmarshal(activeKey, &issued); err != nil {
+		t.Fatal(err)
+	}
+	call("GET", "/v1/models", issued.Data.Key, "", 200)
+	platformToken, _ := platformauth.IssueAccessToken(secret, "admin", "tenant-a", platformauth.RolePlatformAdmin, "controlplane", time.Now(), time.Minute)
+	disableReq, _ := http.NewRequest(http.MethodPost, cpURL+"/api/v1/tenants/tenant-a/disable", nil)
+	disableReq.Header.Set("Authorization", "Bearer "+platformToken)
+	disableResp, err := cp.http.Do(disableReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	disableResp.Body.Close()
+	if disableResp.StatusCode != 200 {
+		t.Fatalf("disable status=%d", disableResp.StatusCode)
+	}
+	call("GET", "/v1/models", issued.Data.Key, "", 403)
+	call("POST", "/v1/chat/completions", issued.Data.Key, `{"model":"e2e-model","messages":[]}`, 403)
 	if err := c.UnregisterRoute(context.Background(), "e2e-model"); err != nil {
 		t.Fatal(err)
 	}

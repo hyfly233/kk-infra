@@ -13,7 +13,8 @@ import (
 type managementClaimsKey struct{}
 
 // Empty secret retains the explicitly unauthenticated local/Fake mode.
-func (s *Server) SetAuthSecret(secret string) { s.authSecret = secret }
+func (s *Server) SetAuthSecret(secret string)                  { s.authSecret = secret }
+func (s *Server) SetUserVerifier(v *platformauth.UserVerifier) { s.userVerifier = v }
 
 func (s *Server) managementRequired(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -29,7 +30,7 @@ func (s *Server) managementRequired(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		c, err := platformauth.ParseAccessToken(s.authSecret, platformauth.BearerToken(r), "controlplane")
+		c, err := s.userVerifier.Verify(r.Context(), platformauth.BearerToken(r))
 		if err != nil || (c.Role != platformauth.RolePlatformAdmin && c.Role != platformauth.RoleTenantAdmin) || (c.Role != platformauth.RolePlatformAdmin && c.TenantID == "") {
 			apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "需要所属租户管理员权限"))
 			return

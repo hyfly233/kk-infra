@@ -20,6 +20,7 @@ func TestKeyManagementTenantIsolationAndImmutableRotation(t *testing.T) {
 	other, _ := keys.Issue("tenant-b")
 	s := NewServer(keys, router.NewTable(), nil, slog.Default())
 	s.SetAuthSecret("secret")
+	s.SetUserVerifier(userVerifierFixture(t, "secret", "gateway"))
 	token := func(role platformauth.Role) string {
 		value, err := platformauth.IssueAccessToken("secret", "admin", "tenant-a", role, "controlplane", time.Now(), time.Minute)
 		if err != nil {
@@ -79,6 +80,7 @@ func TestKeyManagementTenantIsolationAndImmutableRotation(t *testing.T) {
 func TestInternalRoutesRequireControlplaneServiceJWT(t *testing.T) {
 	s := NewServer(auth.NewManager(), router.NewTable(), nil, slog.Default())
 	s.SetAuthSecret("secret")
+	s.SetUserVerifier(userVerifierFixture(t, "secret", "gateway"))
 	valid, _ := platformauth.IssueServiceToken("secret", "controlplane", "gateway")
 	wrongAudience, _ := platformauth.IssueServiceToken("secret", "controlplane", "observability")
 	wrongCaller, _ := platformauth.IssueServiceToken("secret", "pipeline", "gateway")

@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	platformauth "kk-infra/lib/auth"
 	"kk-infra/lib/store"
 	"kk-infra/services/gateway/internal/auth"
 	"kk-infra/services/gateway/internal/proxy"
@@ -87,6 +88,7 @@ func main() {
 	}
 	srv := server.NewServer(keys, routes, p, logger)
 	srv.SetAuthSecret(*authSecret)
+	srv.SetUserVerifier(platformauth.NewUserVerifier(*controlplaneURL, *authSecret, "gateway"))
 	if *authSecret != "" {
 		srv.ConfigureTenantCheck(*controlplaneURL, *authSecret)
 	}

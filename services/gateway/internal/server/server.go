@@ -22,6 +22,7 @@ import (
 
 // Server 网关服务
 type Server struct {
+	userVerifier  *platformauth.UserVerifier
 	keys          *auth.Manager
 	routes        *router.Table
 	proxy         *proxy.Proxy

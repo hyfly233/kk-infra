@@ -20,6 +20,7 @@ import (
 
 func main() {
 	addr := flag.String("addr", ":8082", "监听地址")
+	authSecret := flag.String("auth-secret", os.Getenv("CARROT_AUTH_SECRET"), "内部服务 JWT 签名密钥")
 	fake := flag.Bool("fake", true, "使用 Fake Kubernetes 集群（默认 true）")
 	kubeconfig := flag.String("kubeconfig", "", "真实集群 kubeconfig 路径（默认 ~/.kube/config）")
 	virtualGPUs := flag.String("virtual-gpus", "", "虚拟 GPU 池配置（无 GPU 集群用），格式: node:gpuType:count:memMB:util:health;...")
@@ -64,6 +65,10 @@ func main() {
 	}
 
 	srv := server.NewServer(kube, logger)
+	srv.SetAuthSecret(*authSecret)
+	if *authSecret == "" {
+		logger.Warn("适配器鉴权未启用，仅适用于不安全的本地开发模式")
+	}
 	httpSrv := &http.Server{
 		Addr:              *addr,
 		Handler:           srv.Handler(),

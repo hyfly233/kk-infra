@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"kk-infra/lib/apitypes"
+	platformauth "kk-infra/lib/auth"
 	"kk-infra/lib/errcode"
 	"kk-infra/lib/middleware"
 	"kk-infra/services/k8sadapter/internal/client"
@@ -18,8 +19,21 @@ import (
 
 // Server K8s 适配器 HTTP 服务
 type Server struct {
-	kube   client.KubeClient
-	logger *slog.Logger
+	kube       client.KubeClient
+	logger     *slog.Logger
+	authSecret string
+}
+
+func (s *Server) SetAuthSecret(secret string) { s.authSecret = secret }
+
+func (s *Server) authRequired(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.authSecret != "" && platformauth.AuthenticateService(s.authSecret, platformauth.BearerToken(r), "k8sadapter", "controlplane") != nil {
+			apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "仅允许 controlplane 服务身份访问适配器"))
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // NewServer 创建服务
@@ -42,7 +56,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/deployments/{name}/managed", s.handleDeleteManagedDeployment)
 	return middleware.WithRequestID(
 		middleware.Recover(s.logger,
-			middleware.AccessLog(s.logger, mux),
+			middleware.AccessLog(s.logger, s.authRequired(mux)),
 		),
 	)
 }

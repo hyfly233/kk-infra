@@ -375,7 +375,7 @@ func TestDeploymentNotFound(t *testing.T) {
 func TestJWTIntrospectionReturnsTenantWorkspaceIdentity(t *testing.T) {
 	const secret = "jupyterhub-introspection-secret"
 	srv := NewServer(nil, nil, nil, nil, nil, slog.Default())
-	srv.SetIdentityService(identity.NewService(secret))
+	srv.SetIdentityService(managementIdentity(t, secret))
 	token, err := platformauth.IssueAccessToken(secret, "user-1", "tenant-a", platformauth.RoleDeveloper, "controlplane", time.Now(), time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -404,9 +404,9 @@ func TestJWTIntrospectionReturnsTenantWorkspaceIdentity(t *testing.T) {
 func TestClusterRegistrationAndAgentHeartbeat(t *testing.T) {
 	const secret = "cluster-api-test-secret"
 	srv := NewServer(nil, nil, nil, nil, nil, slog.Default())
-	srv.SetIdentityService(identity.NewService(secret))
+	srv.SetIdentityService(managementIdentity(t, secret))
 	srv.SetClusterService(mustClusterService(t))
-	admin, err := platformauth.IssueAccessToken(secret, "admin", "", platformauth.RolePlatformAdmin, "controlplane", time.Now(), time.Hour)
+	admin, err := platformauth.IssueAccessToken(secret, "admin", "tenant-a", platformauth.RolePlatformAdmin, "controlplane", time.Now(), time.Hour)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -490,12 +490,12 @@ func TestClusterManagementRequiresAdminAndProtectsCredentials(t *testing.T) {
 	const secret = "cluster-management-test-secret"
 	repo := data.NewMemoryDeploymentRepository()
 	srv := NewServer(biz.NewDeploymentUseCase(repo, nil, nil), nil, nil, nil, repo, slog.Default())
-	srv.SetIdentityService(identity.NewService(secret))
+	srv.SetIdentityService(managementIdentity(t, secret))
 	srv.SetClusterService(mustClusterService(t))
 	if _, err := srv.clusters.Register("gpu-west", "west", "https://k8s.example.test", "http://adapter-west:8082", "old-secret", nil, []string{"vLLM"}, nil, ""); err != nil {
 		t.Fatal(err)
 	}
-	admin, _ := platformauth.IssueAccessToken(secret, "admin", "", platformauth.RolePlatformAdmin, "controlplane", time.Now(), time.Hour)
+	admin, _ := platformauth.IssueAccessToken(secret, "admin", "tenant-a", platformauth.RolePlatformAdmin, "controlplane", time.Now(), time.Hour)
 	viewer, _ := platformauth.IssueAccessToken(secret, "viewer", "tenant-a", platformauth.RoleViewer, "controlplane", time.Now(), time.Hour)
 	call := func(method, path, body, token string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
@@ -563,7 +563,7 @@ func TestClusterHeartbeatRejectsWrongAgentAudience(t *testing.T) {
 func TestClusterAgentTokenRequiresAdminAndExistingCluster(t *testing.T) {
 	const secret = "cluster-token-test-secret"
 	srv := NewServer(nil, nil, nil, nil, nil, slog.Default())
-	srv.SetIdentityService(identity.NewService(secret))
+	srv.SetIdentityService(managementIdentity(t, secret))
 	srv.SetClusterService(mustClusterService(t))
 	for _, tc := range []struct {
 		role platformauth.Role
@@ -575,6 +575,9 @@ func TestClusterAgentTokenRequiresAdminAndExistingCluster(t *testing.T) {
 		{platformauth.RolePlatformAdmin, http.StatusNotFound},
 	} {
 		t.Run(string(tc.role), func(t *testing.T) {
+			if err := srv.identity.SetMember("user", "tenant-a", tc.role); err != nil {
+				t.Fatal(err)
+			}
 			token, err := platformauth.IssueAccessToken(secret, "user", "tenant-a", tc.role, "controlplane", time.Now(), time.Hour)
 			if err != nil {
 				t.Fatal(err)
@@ -808,8 +811,8 @@ func TestManualClusterRebuildRequiresAdminAndSubmitsToTarget(t *testing.T) {
 	uc := biz.NewDeploymentUseCase(repo, &mockModelClient{}, newMockKube())
 	uc.SetClusterPlacement(clusterService, clients.NewClusterAdapterPool(clusterService, clients.NewK8sAdapterClient("http://unused.invalid")))
 	srv := NewServer(uc, nil, nil, nil, repo, slog.Default())
-	srv.SetIdentityService(identity.NewService(secret))
-	admin, _ := platformauth.IssueAccessToken(secret, "admin", "", platformauth.RolePlatformAdmin, "controlplane", time.Now(), time.Hour)
+	srv.SetIdentityService(managementIdentity(t, secret))
+	admin, _ := platformauth.IssueAccessToken(secret, "admin", "tenant-a", platformauth.RolePlatformAdmin, "controlplane", time.Now(), time.Hour)
 	viewer, _ := platformauth.IssueAccessToken(secret, "viewer", "tenant-a", platformauth.RoleViewer, "controlplane", time.Now(), time.Hour)
 	call := func(token, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/deployments/deployment-a/rebuild", bytes.NewBufferString(body))

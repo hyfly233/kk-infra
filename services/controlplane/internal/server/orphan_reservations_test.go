@@ -14,7 +14,6 @@ import (
 	"kk-infra/services/controlplane/internal/biz"
 	"kk-infra/services/controlplane/internal/clusters"
 	"kk-infra/services/controlplane/internal/data"
-	"kk-infra/services/controlplane/internal/identity"
 )
 
 func TestOrphanReservationInventoryRequiresAdminAndDoesNotRelease(t *testing.T) {
@@ -41,9 +40,9 @@ func TestOrphanReservationInventoryRequiresAdminAndDoesNotRelease(t *testing.T) 
 		t.Fatal(err)
 	}
 	srv := NewServer(biz.NewDeploymentUseCase(repo, nil, newMockKube()), nil, nil, nil, nil, slog.Default())
-	srv.SetIdentityService(identity.NewService(secret))
+	srv.SetIdentityService(managementIdentity(t, secret))
 	srv.SetClusterService(cs)
-	admin, _ := platformauth.IssueAccessToken(secret, "admin", "", platformauth.RolePlatformAdmin, "controlplane", time.Now(), time.Hour)
+	admin, _ := platformauth.IssueAccessToken(secret, "admin", "tenant-a", platformauth.RolePlatformAdmin, "controlplane", time.Now(), time.Hour)
 	viewer, _ := platformauth.IssueAccessToken(secret, "viewer", "tenant-a", platformauth.RoleViewer, "controlplane", time.Now(), time.Hour)
 	call := func(id, token string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/deployments/"+id+"/orphan-reservations", nil)

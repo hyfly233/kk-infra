@@ -11,13 +11,12 @@ import (
 
 	platformauth "kk-infra/lib/auth"
 	"kk-infra/lib/domain"
-	"kk-infra/services/controlplane/internal/identity"
 )
 
 func TestClusterMonitorTokenHasOnlyMetricsAuthority(t *testing.T) {
 	const secret = "cluster-monitor-contract-secret"
 	srv := NewServer(nil, nil, nil, nil, nil, slog.Default())
-	srv.SetIdentityService(identity.NewService(secret))
+	srv.SetIdentityService(managementIdentity(t, secret))
 	srv.SetClusterService(mustClusterService(t))
 	if _, err := srv.clusters.Register("gpu-west", "west", "https://k8s.example.test", "http://adapter:8082", "secret", nil, nil, nil, ""); err != nil {
 		t.Fatal(err)
@@ -25,7 +24,7 @@ func TestClusterMonitorTokenHasOnlyMetricsAuthority(t *testing.T) {
 	if err := srv.clusters.ReportSnapshot("gpu-west", "healthy", nil, nil, &domain.ClusterTelemetry{Status: "unhealthy", CollectedAt: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
-	admin, _ := platformauth.IssueAccessToken(secret, "admin", "", platformauth.RolePlatformAdmin, "controlplane", time.Now(), time.Hour)
+	admin, _ := platformauth.IssueAccessToken(secret, "admin", "tenant-a", platformauth.RolePlatformAdmin, "controlplane", time.Now(), time.Hour)
 	viewer, _ := platformauth.IssueAccessToken(secret, "viewer", "tenant-a", platformauth.RoleViewer, "controlplane", time.Now(), time.Hour)
 	call := func(method, path, token string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, nil)

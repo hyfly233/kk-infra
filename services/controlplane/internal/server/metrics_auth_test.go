@@ -20,7 +20,8 @@ func TestDeploymentMetricsRejectsOtherTenantBeforeQuery(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := NewServer(biz.NewDeploymentUseCase(r, nil, nil), nil, nil, nil, r, slog.Default())
-	s.SetIdentityService(identity.NewService("secret"))
+	ids := managementIdentity(t, "secret")
+	s.SetIdentityService(ids)
 	for _, tc := range []struct {
 		tenant string
 		role   platformauth.Role
@@ -30,6 +31,9 @@ func TestDeploymentMetricsRejectsOtherTenantBeforeQuery(t *testing.T) {
 		{"tenant-b", platformauth.RoleTenantAdmin, 404},
 		{"tenant-b", platformauth.RolePlatformAdmin, 200},
 	} {
+		if err := ids.SetMember("u", tc.tenant, tc.role); err != nil {
+			t.Fatal(err)
+		}
 		token, _ := platformauth.IssueAccessToken("secret", "u", tc.tenant, tc.role, "controlplane", time.Now(), time.Minute)
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/deployments/d1/metrics", nil)
 		req.Header.Set("Authorization", "Bearer "+token)

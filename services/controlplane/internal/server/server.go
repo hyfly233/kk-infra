@@ -70,6 +70,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/introspect", s.handleIntrospect)
 	mux.HandleFunc("POST /internal/notebooks/introspect", s.handleNotebookIntrospect)
 	mux.HandleFunc("GET /internal/resources/gpus", s.handleInternalGPUs)
+	mux.HandleFunc("GET /internal/tenants/{tenantId}/serving-status", s.handleTenantServingStatus)
 	mux.HandleFunc("POST /api/v1/notebooks/hub-token", s.handleNotebookHubToken)
 	mux.HandleFunc("GET /api/v1/notebooks/workspace", s.handleNotebookWorkspace)
 	mux.HandleFunc("POST /api/v1/notebooks/workspace", s.handleNotebookWorkspace)
@@ -471,6 +472,10 @@ func (s *Server) authRequired(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/internal/tenants/") && strings.HasSuffix(r.URL.Path, "/serving-status") {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v1/clusters/") && strings.HasSuffix(r.URL.Path, "/heartbeat") {
 			next.ServeHTTP(w, r)
 			return
@@ -866,6 +871,20 @@ func (s *Server) handleDeploymentMetrics(w http.ResponseWriter, r *http.Request)
 }
 
 // ---- 资源 ----
+
+func (s *Server) handleTenantServingStatus(w http.ResponseWriter, r *http.Request) {
+	if s.identity == nil || s.identity.AuthenticateService(platformauth.BearerToken(r), "gateway") != nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "需要网关服务身份"))
+		return
+	}
+	tenantID := r.PathValue("tenantId")
+	active, err := s.identity.TenantServingActive(r.Context(), tenantID)
+	if err != nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrInternal, "租户状态查询失败"))
+		return
+	}
+	apitypes.WriteResult(w, r, map[string]any{"tenantId": tenantID, "active": active}, nil)
+}
 
 func (s *Server) handleInternalGPUs(w http.ResponseWriter, r *http.Request) {
 	if s.identity == nil || s.identity.AuthenticateService(platformauth.BearerToken(r), "observability") != nil {

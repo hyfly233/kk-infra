@@ -9,7 +9,6 @@ import (
 	"kk-infra/services/controlplane/internal/biz"
 	"kk-infra/services/controlplane/internal/clusters"
 	"kk-infra/services/controlplane/internal/data"
-	"kk-infra/services/controlplane/internal/identity"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -61,9 +60,9 @@ func TestOrphanCleanupHTTPKeepsCurrentPlacementAndRetriesSafely(t *testing.T) {
 	audit := biz.NewAuditUseCase(data.NewMemoryAuditStore(), slog.Default())
 	uc.SetAudit(audit)
 	s := NewServer(uc, nil, nil, nil, nil, slog.Default())
-	s.SetIdentityService(identity.NewService(secret))
+	s.SetIdentityService(managementIdentity(t, secret))
 	s.SetClusterService(cs)
-	admin, _ := platformauth.IssueAccessToken(secret, "admin", "", platformauth.RolePlatformAdmin, "controlplane", time.Now(), time.Hour)
+	admin, _ := platformauth.IssueAccessToken(secret, "admin", "tenant-a", platformauth.RolePlatformAdmin, "controlplane", time.Now(), time.Hour)
 	viewer, _ := platformauth.IssueAccessToken(secret, "viewer", "tenant-a", platformauth.RoleViewer, "controlplane", time.Now(), time.Hour)
 	call := func(token, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/deployments/d1/orphan-cleanup", bytes.NewBufferString(body))

@@ -2,9 +2,33 @@ package identity
 
 import (
 	"testing"
+	"time"
 
 	platformauth "kk-infra/lib/auth"
 )
+
+func TestClusterAgentTokenIsAudienceAndSubjectBound(t *testing.T) {
+	const secret = "cluster-agent-test-secret"
+	service := NewService(secret)
+	now := time.Now()
+	token, err := platformauth.IssueAccessToken(secret, "gpu-west", "", platformauth.RolePlatformAdmin, "cluster-agent:gpu-west", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AuthenticateClusterAgent(token, "gpu-west"); err != nil {
+		t.Fatalf("valid agent token rejected: %v", err)
+	}
+	if _, err := service.AuthenticateClusterAgent(token, "gpu-east"); err == nil {
+		t.Fatal("token accepted for another cluster")
+	}
+	wrongSubject, err := platformauth.IssueAccessToken(secret, "other", "", platformauth.RolePlatformAdmin, "cluster-agent:gpu-west", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.AuthenticateClusterAgent(wrongSubject, "gpu-west"); err == nil {
+		t.Fatal("token with mismatched subject accepted")
+	}
+}
 
 func TestLoginRefreshLogout(t *testing.T) {
 	s := NewService("test-secret")
@@ -39,8 +63,12 @@ func TestBootstrapOnlyOnce(t *testing.T) {
 	if _, err := s.Bootstrap("u1", "admin@example.com", "correct horse battery staple", "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Login("admin@example.com", "correct horse battery staple", "tenant-a"); err != nil {
+	session, err := s.Login("admin@example.com", "correct horse battery staple", "tenant-a")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if session.Role != platformauth.RolePlatformAdmin {
+		t.Fatalf("first account cannot administer clusters: %s", session.Role)
 	}
 	if _, err := s.Bootstrap("u2", "other@example.com", "correct horse battery staple", "tenant-b"); err == nil {
 		t.Fatal("second bootstrap accepted")

@@ -177,7 +177,7 @@ func (s *Service) loadRefresh(hash string) (*RefreshToken, error) {
 	return r, nil
 }
 
-// Bootstrap 创建首个租户管理员；只允许在完全空的身份仓库中执行一次。
+// Bootstrap 创建首个平台管理员；只允许在完全空的身份仓库中执行一次。
 func (s *Service) Bootstrap(id, email, password, tenantID string) (*User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -195,7 +195,7 @@ func (s *Service) Bootstrap(id, email, password, tenantID string) (*User, error)
 	if err := s.saveUser(u); err != nil {
 		return nil, err
 	}
-	m := Member{UserID: id, TenantID: tenantID, Role: platformauth.RoleTenantAdmin}
+	m := Member{UserID: id, TenantID: tenantID, Role: platformauth.RolePlatformAdmin}
 	if err := s.saveTenant(tenantID, false); err != nil {
 		return nil, err
 	}
@@ -323,4 +323,20 @@ func (s *Service) issueLocked(userID string, m Member) (*Session, error) {
 
 func (s *Service) Authenticate(token string) (*platformauth.Claims, error) {
 	return platformauth.ParseAccessToken(s.secret, token, "controlplane")
+}
+
+func (s *Service) AuthenticateClusterAgent(token, clusterID string) (*platformauth.Claims, error) {
+	claims, err := platformauth.ParseAccessToken(s.secret, token, "cluster-agent:"+clusterID)
+	if err != nil || claims.Subject != clusterID {
+		return nil, fmt.Errorf("invalid cluster agent token")
+	}
+	return claims, nil
+}
+
+// IssueClusterAgentToken limits the credential to one cluster's heartbeat API.
+func (s *Service) IssueClusterAgentToken(clusterID string) (string, time.Time, error) {
+	now := s.now()
+	expires := now.Add(24 * time.Hour)
+	token, err := platformauth.IssueAccessToken(s.secret, clusterID, "", platformauth.RoleViewer, "cluster-agent:"+clusterID, now, 24*time.Hour)
+	return token, expires, err
 }

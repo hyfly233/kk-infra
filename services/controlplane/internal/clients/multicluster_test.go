@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	platformauth "kk-infra/lib/auth"
 	"kk-infra/services/controlplane/internal/clusters"
 )
 
@@ -14,6 +15,11 @@ func TestClusterAdapterPoolRoutesToAssignedAdapter(t *testing.T) {
 	var gotName string
 	var tenantProvisioned bool
 	adapter := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := platformauth.AuthenticateService("adapter-secret", platformauth.BearerToken(r), "k8sadapter", "controlplane"); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		if r.Method == http.MethodPost && r.URL.Path == "/v1/tenants/tenant-a/provision" {
 			tenantProvisioned = true
 			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0})
@@ -34,7 +40,9 @@ func TestClusterAdapterPoolRoutesToAssignedAdapter(t *testing.T) {
 	if _, err := registry.Register("gpu-west", "west", "https://k8s-west.example.test", adapter.URL, "encrypted-at-rest", nil, []string{"vLLM"}, nil, ""); err != nil {
 		t.Fatal(err)
 	}
-	pool := NewClusterAdapterPool(registry, NewK8sAdapterClient("http://unused.invalid"))
+	fallback := NewK8sAdapterClient("http://unused.invalid")
+	fallback.SetServiceIdentity("adapter-secret", "k8sadapter")
+	pool := NewClusterAdapterPool(registry, fallback)
 	result, err := pool.CreateDeploymentForCluster(context.Background(), "gpu-west", &CreateDeploymentSpec{DeploymentID: "d1", Name: "model-a", Labels: map[string]string{"carrot.ai/tenant-id": "tenant-a"}})
 	if err != nil {
 		t.Fatal(err)

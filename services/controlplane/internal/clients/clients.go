@@ -240,7 +240,11 @@ func (p *ClusterAdapterPool) adapter(clusterID string) (*K8sAdapterClient, error
 	if cluster.AdapterURL == "" {
 		return nil, fmt.Errorf("cluster %s has no adapter URL", clusterID)
 	}
-	return NewK8sAdapterClient(cluster.AdapterURL), nil
+	adapter := NewK8sAdapterClient(cluster.AdapterURL)
+	if p.fallback != nil {
+		adapter.SetServiceIdentity(p.fallback.serviceSecret, p.fallback.serviceAudience)
+	}
+	return adapter, nil
 }
 
 func (p *ClusterAdapterPool) CreateDeploymentForCluster(ctx context.Context, clusterID string, spec *CreateDeploymentSpec) (*K8sDeploymentResult, error) {

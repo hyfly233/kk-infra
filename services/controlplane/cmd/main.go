@@ -72,6 +72,7 @@ func main() {
 	modelClient := clients.NewModelRegistryClient(*modelRegistry)
 	modelClient.SetServiceIdentity(*authSecret, "modelregistry")
 	kubeClient := clients.NewK8sAdapterClient(*k8sAdapter)
+	kubeClient.SetServiceIdentity(*authSecret, "k8sadapter")
 	var clusterService *clusters.Service
 	if encryptionKey := os.Getenv("CLUSTER_ENCRYPTION_KEY"); encryptionKey != "" {
 		key, err := base64.StdEncoding.DecodeString(encryptionKey)

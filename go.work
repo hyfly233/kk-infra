@@ -10,4 +10,5 @@ use (
 	./services/gateway
 	./services/observability
 	./services/pipeline
+	./services/disaggproxy
 )

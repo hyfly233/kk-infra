@@ -30,6 +30,7 @@ func main() {
 	progressiveEnabled := flag.Bool("progressive-delivery", false, "使用 Argo Rollouts + Istio 执行渐进交付")
 	volcanoEnabled := flag.Bool("volcano-enabled", false, "使用 Volcano Queue/PodGroup 调度 GPU 工作负载")
 	volcanoQueuePrefix := flag.String("volcano-queue-prefix", "tenant-", "Volcano 租户队列名称前缀")
+	disaggProxyImage := flag.String("disaggregated-proxy-image", "", "启用 Prefill/Decode 时使用的 disaggproxy 镜像；为空则拒绝该模式")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -48,6 +49,7 @@ func main() {
 		real.ConfigureArtifactStorage(*s3Endpoint, os.Getenv("S3_ACCESS_KEY"), os.Getenv("S3_SECRET_KEY"), *s3Secure)
 		real.ConfigureProgressiveDelivery(*progressiveEnabled)
 		real.ConfigureVolcano(*volcanoEnabled, *volcanoQueuePrefix)
+		real.ConfigureDisaggregatedServing(*disaggProxyImage)
 		kube = real
 		if *virtualGPUs != "" {
 			logger.Info("k8sadapter 使用真实集群 + 虚拟 GPU 池", "virtualGPUs", *virtualGPUs)

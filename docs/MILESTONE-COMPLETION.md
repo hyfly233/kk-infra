@@ -12,7 +12,8 @@
 - [ ] 复核全部管理 API 的用户/租户/服务 audience 授权和凭据脱敏，形成越租户、伪造 JWT、refresh token 失效测试矩阵。
 - [x] gateway Key 管理支持管理员 JWT/租户隔离和不变租户轮换，控制台创建 Key 使用当前租户，内部路由限定 controlplane 服务 JWT；observability 聚合接口限定调用服务，控制面/网关客户端及 GPU collector 已接服务 JWT。控制面部署指标先检查租户；JWT 强制期限/固定角色，Key 元数据隐藏哈希。全量 Go、前端构建/专项测试、HTTP 与独立进程 Fake E2E 通过，记录见 `SERVICE-AUTH.md`；不替代真实存储/网络验收。
 - [x] 模型租户隔离首版：migration 023 持久化归属，注册中心用户/服务 JWT 与只读 URI 脱敏，部署生命周期及流水线复核版本租户；直接用户发布被拒绝，控制台改为流水线启动/审批。历史空归属记录隔离而非猜测迁移。Go 回归、前端构建/专项测试和独立进程 Fake E2E 通过，边界见 `SERVICE-AUTH.md`。
-- [ ] 已确认缺口：历史归属恢复、adapter 内部授权、停用租户的存量推理 Key 撤权和整体 NetworkPolicy 尚未收口。短期 JWT 校验不代表在线成员撤权；不标记安全里程碑完成。
+- [x] adapter 管理接口限定 controlplane 服务 JWT；默认及多集群客户端继承 audience 身份并拒绝重定向。错误 audience/caller/signature、过期令牌、匿名及用户 JWT 拒绝测试、跨集群客户端契约和启用鉴权的独立进程 Fake 部署 E2E 通过。远端 TLS/网络隔离及密钥运维未验收。
+- [ ] 已确认缺口：历史归属恢复、停用租户的存量推理 Key 撤权和整体 NetworkPolicy 尚未收口。短期 JWT 校验不代表在线成员撤权；不标记安全里程碑完成。
 - [ ] 对齐租户启停、Namespace/RBAC/Quota/NetworkPolicy 的幂等生命周期和失败恢复。
 - [x] 孤儿扫描覆盖所有命名空间，按集群/namespace/名称匹配，检测事件写审计并在同一进程周期内去重；不自动删除。已补 Fake/模拟 API 与审计回归，真实 API 权限验收未运行。
 - [ ] 验证副本漂移修复、租户配额与部署状态的原子认领、失败/删除/重启释放一致性。

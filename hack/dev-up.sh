@@ -96,7 +96,7 @@ management_ready() {
 for i in $(seq 1 30); do
   ok=0
   management_ready http://127.0.0.1:8081/api/v1/models && ok=$((ok+1))
-  curl -sf http://127.0.0.1:8082/v1/resources/gpus >/dev/null 2>&1 && ok=$((ok+1))
+  management_ready http://127.0.0.1:8082/v1/resources/gpus && ok=$((ok+1))
   management_ready http://127.0.0.1:8080/api/v1/deployments && ok=$((ok+1))
   management_ready http://127.0.0.1:8084/api/v1/deployments/x/metrics && ok=$((ok+1))
   # gateway /v1/models 需要鉴权，401 即服务已就绪

@@ -12,8 +12,8 @@ test_dir=$(mktemp -d "${TMPDIR:-/tmp}/kk-model-tenant.XXXXXX")
 umask 077
 pids=()
 cleanup() {
-  for pid in "${pids[@]}"; do kill "$pid" 2>/dev/null || true; done
-  for pid in "${pids[@]}"; do wait "$pid" 2>/dev/null || true; done
+  for pid in ${pids[@]+"${pids[@]}"}; do kill "$pid" 2>/dev/null || true; done
+  for pid in ${pids[@]+"${pids[@]}"}; do wait "$pid" 2>/dev/null || true; done
   echo "Local test logs: $test_dir"
 }
 trap cleanup EXIT
@@ -22,7 +22,7 @@ for service in controlplane modelregistry k8sadapter inference pipeline; do
 done
 CARROT_AUTH_SECRET=local-model-tenant-test-secret "$test_dir/modelregistry" --addr=127.0.0.1:19281 --storage=memory >"$test_dir/registry.log" 2>&1 &
 pids+=("$!")
-"$test_dir/k8sadapter" --fake=true --addr=127.0.0.1:19282 >"$test_dir/adapter.log" 2>&1 &
+CARROT_AUTH_SECRET=local-model-tenant-test-secret "$test_dir/k8sadapter" --fake=true --addr=127.0.0.1:19282 >"$test_dir/adapter.log" 2>&1 &
 pids+=("$!")
 "$test_dir/inference" --addr=127.0.0.1:19285 >"$test_dir/inference.log" 2>&1 &
 pids+=("$!")
@@ -40,6 +40,8 @@ for port in 19280 19281 19282 19285 19286; do
   done
   "$ready" || { echo "Service did not start on $port" >&2; exit 1; }
 done
+adapter_status=$(curl --max-time 2 -s -o /dev/null -w '%{http_code}' http://127.0.0.1:19282/v1/resources/gpus)
+[ "$adapter_status" = 401 ] || { echo "Anonymous adapter request returned $adapter_status, expected 401" >&2; exit 1; }
 MODEL_E2E_REGISTRY=http://127.0.0.1:19281 MODEL_E2E_CP=http://127.0.0.1:19280 MODEL_E2E_PIPELINE=http://127.0.0.1:19286 \
   go test ./services/controlplane/internal/clients -run '^TestModelTenantBinaryLifecycle$' -count=1
 echo 'Model tenant / pipeline / deployment Fake E2E passed (not real S3/Kubernetes).'

@@ -2,7 +2,7 @@
 
 ## 当前已实施边界
 
-controlplane、modelregistry、pipeline、gateway、observability 注入同一 `CARROT_AUTH_SECRET`；使用环境注入，不把密钥放进命令行或 Git。空密钥仅保留不安全的本地 Fake 开发兼容模式；不能用于生产。
+controlplane、modelregistry、pipeline、k8sadapter、gateway、observability 注入同一 `CARROT_AUTH_SECRET`；注册集群的远端 adapter 也必须配置匹配的密钥。使用环境注入，不把密钥放进命令行或 Git。空密钥仅保留不安全的本地 Fake 开发兼容模式；不能用于生产。
 
 | 接口 | 启用认证后的身份 |
 | --- | --- |
@@ -16,8 +16,11 @@ controlplane、modelregistry、pipeline、gateway、observability 注入同一 `
 | modelregistry 内部读取 | `aud=service:modelregistry`，subject 为 controlplane 或 pipeline |
 | modelregistry 版本 validate/release 内部写入 | 同 audience，仅 pipeline；用户不能直接 release |
 | pipeline 发布/审批/查询 | 用户 JWT 与租户授权；启动和审批重新查询模型版本归属 |
+| k8sadapter 全部 `/v1` 管理接口 | `aud=service:k8sadapter`，subject 仅 controlplane；用户及集群心跳 JWT 不可调用 |
 
 内部 HTTP 客户端每次生成一分钟服务 JWT，使用专用 audience、固定只读 role、空 tenant；服务身份不可用于用户管理 API。服务客户端拒绝重定向，不向跳转地址传递凭据。所有 JWT 必须带有效期限和四级角色之一。
+
+控制面默认 adapter 和已注册集群 adapter 均发送上述身份，包括租户初始化、部署读写、重启和受管删除。租户授权由控制面完成，adapter 不直接接受用户 JWT。集群心跳使用另一专属身份，不能混用。启用鉴权时 `dev-up.sh` 以匿名 401 检查管理 HTTP 可达性；这不等同于依赖就绪。
 
 租户管理员只能列出/修改本租户 Key，越租户 Key ID 返回 404；平台管理员可管理所有租户。轮换只能继承旧 Key 的租户，不能重新归属。响应不含哈希；新明文只在创建/轮换结果返回，响应禁止缓存。控制面部署指标查询先检查所属租户，再向 observability 转发。用户账单仍经控制面租户授权接口访问，不直接开放观测服务聚合查询。
 
@@ -52,4 +55,4 @@ npm run build
 
 模型租户 E2E 使用独立 controlplane/modelregistry/pipeline 二进制、内存存储、开发 artifact verifier、Mock 推理和 Fake adapter，覆盖越租户读取/发布/部署、人工审批及控制面服务身份读取。不验证 artifact 字节、真实模型探针或 PostgreSQL migration。
 
-adapter 内部授权及整套 NetworkPolicy 仍需收口。Key 管理目前验证短期用户 JWT，不主动查询成员撤权；已停用租户的存量推理 Key 尚需在线撤权。历史模型/部署归属恢复、JWT 密钥轮换和全部越租户测试矩阵未完成，不标记安全里程碑完成。
+整套 NetworkPolicy 仍需收口，远端 adapter 必须使用 TLS 和受限网络入口；共享签名密钥不是集群级密钥隔离。Key 管理目前验证短期用户 JWT，不主动查询成员撤权；已停用租户的存量推理 Key 尚需在线撤权。历史模型/部署归属恢复、JWT 密钥轮换和全部越租户测试矩阵未完成，不标记安全里程碑完成。

@@ -42,15 +42,19 @@ func ParseAccessToken(secret, tokenString, audience string) (*Claims, error) {
 			return nil, fmt.Errorf("unexpected signing method")
 		}
 		return []byte(secret), nil
-	})
+	}, jwt.WithExpirationRequired())
 	if err != nil || !token.Valid {
 		return nil, fmt.Errorf("invalid access token")
 	}
 	claims, ok := token.Claims.(*Claims)
-	if !ok || claims.Subject == "" || claims.Role == "" || (audience != "" && !hasAudience(claims.Audience, audience)) {
+	if !ok || claims.Subject == "" || !ValidRole(claims.Role) || (audience != "" && !hasAudience(claims.Audience, audience)) {
 		return nil, fmt.Errorf("invalid access token claims")
 	}
 	return claims, nil
+}
+
+func ValidRole(role Role) bool {
+	return role == RolePlatformAdmin || role == RoleTenantAdmin || role == RoleDeveloper || role == RoleViewer
 }
 
 func hasAudience(audiences jwt.ClaimStrings, wanted string) bool {

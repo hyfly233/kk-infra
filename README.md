@@ -87,7 +87,7 @@ npm install
 npm run dev        # http://localhost:5173
 ```
 
-控制台使用邮箱、密码和租户 ID 调用真实登录 API，使用短期 access token、刷新和退出接口；会话支持平台管理员、租户管理员、开发者和只读者。需为 controlplane 配置签名密钥并启用认证，提前创建账号和租户成员关系。无认证 Fake 开发模式不能直接登录控制台。其他服务的管理接口统一鉴权及租户隔离尚待收口，当前不能将控制台登录视为整个系统已安全隔离；这些端口不得直接暴露给非可信网络。
+控制台使用邮箱、密码和租户 ID 调用真实登录 API，使用短期 access token、刷新和退出接口；会话支持平台管理员、租户管理员、开发者和只读者。需为 controlplane 配置签名密钥并启用认证，提前创建账号和租户成员关系。无认证 Fake 开发模式不能直接登录控制台。gateway 与 observability 的已实施鉴权及配置见 [服务身份指南](docs/SERVICE-AUTH.md)；modelregistry、adapter/pipeline 及存量推理 Key 撤权仍待收口，不能据控制台登录宣称整个系统已安全隔离。未收口管理端口不得直接暴露给非可信网络。
 
 Notebook 管理、Hub 身份和部署配置见 [Notebook 指南](docs/NOTEBOOK.md)。
 

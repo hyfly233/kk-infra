@@ -1,0 +1,29 @@
+# Exposition /metrics has no HTTP authentication: CNI enforcement is mandatory.
+# Match the platform deployment namespace/labels before applying this policy.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: observability-access
+  namespace: carrot-ai
+spec:
+  podSelector:
+    matchLabels:
+      app: observability
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: controlplane
+        - podSelector:
+            matchLabels:
+              app: gateway
+        - podSelector:
+            matchLabels:
+              app: k8sadapter
+        - podSelector:
+            matchLabels:
+              app: prometheus
+      ports:
+        - protocol: TCP
+          port: 8084

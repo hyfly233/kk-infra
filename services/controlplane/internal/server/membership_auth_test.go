@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -50,4 +51,33 @@ func TestControlplaneRejectsOldRoleAndRefreshesCurrentRole(t *testing.T) {
 		t.Fatalf("refresh status=%d body=%s", w.Code, w.Body.String())
 	}
 	call(result.Data.AccessToken, 401)
+}
+
+func TestInternalIntrospectionRequiresAllowedServiceAndCurrentMember(t *testing.T) {
+	ids := managementIdentity(t, "secret")
+	s := NewServer(nil, nil, nil, nil, nil, slog.Default())
+	s.SetIdentityService(ids)
+	cp := httptest.NewServer(s.Handler())
+	defer cp.Close()
+	session, err := ids.Login("admin@example.test", "test-password", "tenant-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, caller := range []string{"gateway", "modelregistry", "pipeline"} {
+		v := platformauth.NewUserVerifier(cp.URL, "secret", caller)
+		if _, err := v.Verify(context.Background(), session.AccessToken); err != nil {
+			t.Fatalf("%s: %v", caller, err)
+		}
+	}
+	if _, err := platformauth.NewUserVerifier(cp.URL, "secret", "k8sadapter").Verify(context.Background(), session.AccessToken); err == nil {
+		t.Fatal("unlisted caller accepted")
+	}
+	if err := ids.SetMember("admin", "tenant-a", platformauth.RoleViewer); err != nil {
+		t.Fatal(err)
+	}
+	for _, caller := range []string{"gateway", "modelregistry", "pipeline"} {
+		if _, err := platformauth.NewUserVerifier(cp.URL, "secret", caller).Verify(context.Background(), session.AccessToken); err == nil {
+			t.Fatalf("%s accepted old role", caller)
+		}
+	}
 }

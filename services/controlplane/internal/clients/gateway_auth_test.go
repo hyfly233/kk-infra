@@ -52,7 +52,29 @@ func TestGatewayBinaryAuthenticatedLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.UnregisterRoute(context.Background(), "e2e-model")
-	admin, _ := platformauth.IssueAccessToken(secret, "admin", "tenant-a", platformauth.RoleTenantAdmin, "controlplane", time.Now(), time.Minute)
+	var session struct {
+		AccessToken string `json:"accessToken"`
+	}
+	if err := cp.do(context.Background(), http.MethodPost, "/api/v1/auth/login", map[string]string{"email": "admin@example.test", "password": "Strong-password-123", "tenantId": "tenant-a"}, &session); err != nil {
+		t.Fatal(err)
+	}
+	admin := session.AccessToken
+	cpWrite := func(method, path, body string) {
+		t.Helper()
+		r, _ := http.NewRequest(method, cpURL+path, strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer "+admin)
+		r.Header.Set("Content-Type", "application/json")
+		resp, err := cp.http.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("controlplane %s: %d", path, resp.StatusCode)
+		}
+	}
+	cpWrite("POST", "/api/v1/users", `{"id":"other","email":"other@example.test","password":"Strong-password-123"}`)
+	cpWrite("PUT", "/api/v1/tenants/tenant-b/members/other", `{"role":"tenant_admin"}`)
 	call := func(method, path, token, body string, want int) []byte {
 		t.Helper()
 		r, _ := http.NewRequest(method, base+path, strings.NewReader(body))
@@ -120,6 +142,9 @@ func TestGatewayBinaryAuthenticatedLifecycle(t *testing.T) {
 	}
 	other, _ := platformauth.IssueAccessToken(secret, "other", "tenant-b", platformauth.RoleTenantAdmin, "controlplane", time.Now(), time.Minute)
 	call("POST", "/api/v1/keys/"+issued.Data.ID+"/disable", other, "", 404)
+	call("GET", "/api/v1/keys", other, "", 200)
+	cpWrite("PUT", "/api/v1/tenants/tenant-b/members/other", `{"role":"viewer"}`)
+	call("GET", "/api/v1/keys", other, "", 401)
 	call("POST", "/api/v1/keys/"+issued.Data.ID+"/disable", admin, "", 200)
 	call("GET", "/v1/models", issued.Data.Key, "", 403)
 	// Keep a second Key enabled: tenant disable must revoke inference independently.

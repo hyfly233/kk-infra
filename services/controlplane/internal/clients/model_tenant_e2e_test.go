@@ -8,8 +8,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	platformauth "kk-infra/lib/auth"
 )
 
 func TestModelTenantBinaryLifecycle(t *testing.T) {
@@ -43,8 +41,12 @@ func TestModelTenantBinaryLifecycle(t *testing.T) {
 	call(cp, "POST", "/api/v1/auth/bootstrap", "", `{"id":"admin","email":"admin@example.test","password":"Local-only-pass123!","tenantId":"tenant-a"}`, 200)
 	login := call(cp, "POST", "/api/v1/auth/login", "", `{"email":"admin@example.test","password":"Local-only-pass123!","tenantId":"tenant-a"}`, 200)
 	admin := login["data"].(map[string]any)["accessToken"].(string)
-	dev, _ := platformauth.IssueAccessToken(secret, "developer", "tenant-a", platformauth.RoleDeveloper, "controlplane", time.Now(), time.Minute)
-	other, _ := platformauth.IssueAccessToken(secret, "other", "tenant-b", platformauth.RoleTenantAdmin, "controlplane", time.Now(), time.Minute)
+	for _, user := range []struct{ id, tenant, role string }{{"developer", "tenant-a", "developer"}, {"other", "tenant-b", "tenant_admin"}} {
+		call(cp, "POST", "/api/v1/users", admin, `{"id":"`+user.id+`","email":"`+user.id+`@example.test","password":"Local-only-pass123!"}`, 200)
+		call(cp, "PUT", "/api/v1/tenants/"+user.tenant+"/members/"+user.id, admin, `{"role":"`+user.role+`"}`, 200)
+	}
+	dev := call(cp, "POST", "/api/v1/auth/login", "", `{"email":"developer@example.test","password":"Local-only-pass123!","tenantId":"tenant-a"}`, 200)["data"].(map[string]any)["accessToken"].(string)
+	other := call(cp, "POST", "/api/v1/auth/login", "", `{"email":"other@example.test","password":"Local-only-pass123!","tenantId":"tenant-b"}`, 200)["data"].(map[string]any)["accessToken"].(string)
 	call(registry, "GET", "/api/v1/models", "", "", 401)
 	model := call(registry, "POST", "/api/v1/models", dev, `{"name":"tenant-model","tenantId":"tenant-b"}`, 200)["data"].(map[string]any)
 	if model["tenantId"] != "tenant-a" {
@@ -98,6 +100,8 @@ func TestModelTenantBinaryLifecycle(t *testing.T) {
 	refreshToken := login["data"].(map[string]any)["refreshToken"].(string)
 	call(cp, "PUT", "/api/v1/tenants/tenant-a/members/admin", admin, `{"role":"viewer"}`, 200)
 	call(cp, "GET", "/api/v1/tenants/tenant-a/members", admin, "", 401)
+	call(registry, "GET", "/api/v1/models", admin, "", 401)
+	call(pipeline, "GET", "/api/v1/releases", admin, "", 401)
 	fresh := call(cp, "POST", "/api/v1/auth/refresh", "", `{"refreshToken":"`+refreshToken+`"}`, 200)["data"].(map[string]any)
 	if fresh["role"] != "viewer" {
 		t.Fatalf("refresh retained old role: %+v", fresh)

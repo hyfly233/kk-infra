@@ -68,6 +68,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/refresh", s.handleRefresh)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.handleLogout)
 	mux.HandleFunc("POST /api/v1/auth/introspect", s.handleIntrospect)
+	mux.HandleFunc("POST /internal/auth/introspect", s.handleInternalIntrospect)
 	mux.HandleFunc("POST /internal/notebooks/introspect", s.handleNotebookIntrospect)
 	mux.HandleFunc("GET /internal/resources/gpus", s.handleInternalGPUs)
 	mux.HandleFunc("GET /internal/tenants/{tenantId}/serving-status", s.handleTenantServingStatus)
@@ -128,6 +129,17 @@ func (s *Server) Handler() http.Handler {
 			middleware.AccessLog(s.logger, base),
 		),
 	)
+}
+
+func (s *Server) handleInternalIntrospect(w http.ResponseWriter, r *http.Request) {
+	if s.identity == nil || (s.identity.AuthenticateService(platformauth.BearerToken(r), "gateway") != nil && s.identity.AuthenticateService(platformauth.BearerToken(r), "modelregistry") != nil && s.identity.AuthenticateService(platformauth.BearerToken(r), "pipeline") != nil) {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "需要管理服务身份"))
+		return
+	}
+	// Service bearer authenticates the caller; the body holds the user session.
+	r.Header.Del("Authorization")
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	s.handleIntrospect(w, r)
 }
 
 func (s *Server) handleIntrospect(w http.ResponseWriter, r *http.Request) {
@@ -469,6 +481,10 @@ func (s *Server) authRequired(next http.Handler) http.Handler {
 			return
 		}
 		if r.Method == http.MethodGet && r.URL.Path == "/internal/resources/gpus" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Path == "/internal/auth/introspect" {
 			next.ServeHTTP(w, r)
 			return
 		}

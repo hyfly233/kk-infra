@@ -20,14 +20,14 @@ trap cleanup EXIT
 for service in controlplane modelregistry k8sadapter inference pipeline; do
   go build -o "$test_dir/$service" "./services/$service/cmd"
 done
-CARROT_AUTH_SECRET=local-model-tenant-test-secret "$test_dir/modelregistry" --addr=127.0.0.1:19281 --storage=memory >"$test_dir/registry.log" 2>&1 &
+CARROT_AUTH_SECRET=local-model-tenant-test-secret "$test_dir/modelregistry" --addr=127.0.0.1:19281 --storage=memory --controlplane-url=http://127.0.0.1:19280 >"$test_dir/registry.log" 2>&1 &
 pids+=("$!")
 CARROT_AUTH_SECRET=local-model-tenant-test-secret "$test_dir/k8sadapter" --fake=true --addr=127.0.0.1:19282 >"$test_dir/adapter.log" 2>&1 &
 pids+=("$!")
 "$test_dir/inference" --addr=127.0.0.1:19285 >"$test_dir/inference.log" 2>&1 &
 pids+=("$!")
 CARROT_AUTH_SECRET=local-model-tenant-test-secret "$test_dir/pipeline" --addr=127.0.0.1:19286 --storage=memory \
-  --model-registry=http://127.0.0.1:19281 --probe-url=http://127.0.0.1:19285 >"$test_dir/pipeline.log" 2>&1 &
+  --controlplane-url=http://127.0.0.1:19280 --model-registry=http://127.0.0.1:19281 --probe-url=http://127.0.0.1:19285 >"$test_dir/pipeline.log" 2>&1 &
 pids+=("$!")
 CARROT_AUTH_SECRET=local-model-tenant-test-secret "$test_dir/controlplane" --addr=127.0.0.1:19280 --storage=memory \
   --model-registry=http://127.0.0.1:19281 --k8s-adapter=http://127.0.0.1:19282 --gateway-url= --observability-url= >"$test_dir/controlplane.log" 2>&1 &

@@ -18,6 +18,7 @@ controlplane、modelregistry、pipeline、k8sadapter、gateway、observability �
 | pipeline 发布/审批/查询 | 用户 JWT 与租户授权；启动和审批重新查询模型版本归属 |
 | k8sadapter 全部 `/v1` 管理接口 | `aud=service:k8sadapter`，subject 仅 controlplane；用户及集群心跳 JWT 不可调用 |
 | controlplane `/internal/tenants/{tenantId}/serving-status` | `aud=service:controlplane`，subject 仅 gateway |
+| controlplane `/internal/auth/introspect` | 同 audience，subject 仅 gateway/modelregistry/pipeline；用户 token 放请求体 |
 
 内部 HTTP 客户端每次生成一分钟服务 JWT，使用专用 audience、固定只读 role、空 tenant；服务身份不可用于用户管理 API。服务客户端拒绝重定向，不向跳转地址传递凭据。所有 JWT 必须带有效期限和四级角色之一。
 
@@ -33,7 +34,7 @@ OpenAI `/v1/models`、`/v1/chat/completions` 继续使用 API Key，不改为用
 
 控制面管理 API、JWT introspection 和 Notebook 复核当前用户、租户及成员角色；未知用户、停用用户/租户、移除成员或角色变化均拒绝旧 access token。登录和 refresh 同样复核，refresh 使用当前角色而不是会话旧角色。PostgreSQL 使用三秒超时的实时关联查询，查询异常不放行；内存模式以当前身份表为准。为成员加入新租户时登记租户，数据库冲突不覆盖现有停用状态。生产用户 JWT 必须对应实际账号和成员记录，手工签名不能替代注册。
 
-此在线成员复核目前只覆盖 controlplane/Notebook；gateway Key 管理、modelregistry 和 pipeline 的用户 JWT 仍仅本地验签，角色变更到 token 过期之间仍有权限窗口，不能视为全平台撤权完成。
+gateway Key 管理、modelregistry 和 pipeline 的所有用户管理请求也调用内部 introspection 复核当前成员；角色变更后的旧 JWT 拒绝 401。三个服务设置 `--controlplane-url`（默认 `http://127.0.0.1:8080`，容器中替换为 Service 地址）。共用客户端先验签，再使用专属服务 JWT 提交用户 token，并核对返回的用户、租户、角色和有效期；不缓存放行结果，三秒超时且拒绝重定向。控制面不可达、返回异常或客户端未配置均拒绝用户请求。pipeline 用户会话仅支持 `controlplane` audience。内部服务 JWT 不走用户成员复核，仍按各服务固定 audience/caller 授权；OpenAI API Key 继续走租户启用校验，不改为用户 JWT。
 
 ## 模型归属与发布
 
@@ -64,4 +65,4 @@ npm run build
 
 模型租户 E2E 使用独立 controlplane/modelregistry/pipeline 二进制、内存存储、开发 artifact verifier、Mock 推理和 Fake adapter，覆盖越租户读取/发布/部署、人工审批及控制面服务身份读取。不验证 artifact 字节、真实模型探针或 PostgreSQL migration。
 
-整套 NetworkPolicy 仍需收口，远端 adapter 必须使用 TLS 和受限网络入口；共享签名密钥不是集群级密钥隔离。跨服务用户成员撤权、历史模型/部署归属恢复、JWT 密钥轮换和全部越租户测试矩阵未完成，不标记安全里程碑完成。
+整套 NetworkPolicy 仍需收口，远端 adapter 必须使用 TLS 和受限网络入口；共享签名密钥不是集群级密钥隔离。已开始的管理操作不会因后续撤权自动中断。历史模型/部署归属恢复、JWT 密钥轮换和全部越租户测试矩阵未完成，真实 PostgreSQL 多实例撤权尚未验收，不标记安全里程碑完成。

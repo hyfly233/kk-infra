@@ -12,6 +12,14 @@ data:
     rule_files:
       - /etc/prometheus/alerts.yml
     scrape_configs:
+      # 集群告警抓取：签发 monitor-token 并挂载只读 Secret 后启用以下 job。
+      # 不要使用管理员 access token，也不要将凭据写入 ConfigMap。
+      # - job_name: carrot-cluster-monitor
+      #   metrics_path: /internal/clusters/metrics
+      #   authorization:
+      #     credentials_file: /run/secrets/cluster-monitor/token
+      #   static_configs:
+      #     - targets: [controlplane.carrot-ai.svc.cluster.local:8080]
       - job_name: carrot-observability
         static_configs:
           - targets: [observability.carrot-ai.svc.cluster.local:8084]

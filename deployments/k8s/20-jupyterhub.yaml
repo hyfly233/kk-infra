@@ -16,8 +16,17 @@ metadata:
   name: carrot-jupyterhub-spawner
 rules:
   - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get"]
+  - apiGroups: [""]
     resources: ["pods", "pods/log", "persistentvolumeclaims", "events", "services"]
     verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  - apiGroups: ["scheduling.volcano.sh"]
+    resources: ["queues"]
+    verbs: ["get"]
+  - apiGroups: ["scheduling.volcano.sh"]
+    resources: ["podgroups"]
+    verbs: ["get", "create", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -39,49 +48,155 @@ metadata:
   namespace: jupyterhub
 data:
   jupyterhub_config.py: |
+    import asyncio
+    import hashlib
     import os
     import re
     import requests
     from jupyterhub.auth import Authenticator
 
+    async def platform_identity(token, spawn=False):
+        response = await asyncio.to_thread(
+            requests.post,
+            os.environ["PLATFORM_INTROSPECTION_URL"],
+            headers={"Authorization": "Bearer " + os.environ["PLATFORM_HUB_TOKEN"]},
+            json={"token": token, "spawn": spawn}, timeout=10,
+        )
+        response.raise_for_status()
+        result = response.json()
+        tenant = result.get("tenantId", "")
+        if not result.get("active") or not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,54}[a-z0-9])?", tenant):
+            raise ValueError("inactive platform identity")
+        expected = "nb-" + hashlib.sha256((tenant + "\0" + result["sub"]).encode()).hexdigest()[:32]
+        if result.get("hubUsername") != expected:
+            raise ValueError("platform owner mismatch")
+        return result
+
     class PlatformJWTAuthenticator(Authenticator):
+        def check_allowed(self, username, authentication=None):
+            # authenticate already checks active platform membership.
+            return True
+
         async def authenticate(self, handler, data):
-            token = (data or {}).get("password", "").strip()
-            if not token:
+            # Hub's username field is email|tenant; passwords remain server-side.
+            username = (data or {}).get("username", "")
+            password = (data or {}).get("password", "")
+            if "|" not in username or not password:
                 return None
-            response = requests.post(
-                os.environ["PLATFORM_INTROSPECTION_URL"],
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=10,
-            )
-            result = response.json()
-            tenant = result.get("tenantId", "")
-            if not result.get("active") or not re.fullmatch(r"[a-z0-9-]+", tenant):
+            email, tenant = username.rsplit("|", 1)
+            try:
+                response = await asyncio.to_thread(
+                    requests.post, os.environ["PLATFORM_LOGIN_URL"],
+                    json={"email": email, "password": password, "tenantId": tenant}, timeout=10,
+                )
+                response.raise_for_status()
+                session = response.json()["data"]
+                token = session["accessToken"]
+                # The Hub does not keep a long-lived platform refresh token.
+                logout = await asyncio.to_thread(
+                    requests.post, os.environ["PLATFORM_LOGOUT_URL"],
+                    json={"refreshToken": session["refreshToken"]}, timeout=10,
+                )
+                logout.raise_for_status()
+                result = await platform_identity(token)
+            except (requests.RequestException, ValueError, KeyError):
                 return None
             return {
-                "name": result["sub"],
-                "auth_state": {"tenant_id": tenant, "role": result["role"]},
+                "name": result["hubUsername"],
+                "auth_state": {"platform_token": token},
             }
 
+    async def kubernetes_request(method, path, body=None):
+        with open("/var/run/secrets/kubernetes.io/serviceaccount/token") as stream:
+            token = stream.read().strip()
+        response = await asyncio.to_thread(
+            requests.request, method,
+            "https://kubernetes.default.svc" + path,
+            headers={"Authorization": "Bearer " + token}, json=body, timeout=10,
+            verify="/var/run/secrets/kubernetes.io/serviceaccount/ca.crt",
+        )
+        return response
+
     async def configure_tenant_workspace(spawner):
-        auth_state = await spawner.user.get_auth_state()
-        tenant = auth_state["tenant_id"]
+        if spawner.name != "workspace":
+            raise ValueError("only the platform workspace server is permitted")
+        grant = spawner.user_options.get("platform_spawn_token", "")
+        if grant:
+            result = await platform_identity(grant, spawn=True)
+        else:
+            auth_state = await spawner.user.get_auth_state() or {}
+            result = await platform_identity(auth_state.get("platform_token", ""))
+        if result["hubUsername"] != spawner.user.name or result["role"] == "viewer":
+            raise ValueError("workspace owner or role mismatch")
+        tenant = result["tenantId"]
+        queue = await kubernetes_request("GET", f"/apis/scheduling.volcano.sh/v1beta1/queues/tenant-{tenant}")
+        queue.raise_for_status()
+        if queue.json().get("metadata", {}).get("labels", {}).get("carrot.ai/tenant-id") != tenant:
+            raise ValueError("Volcano queue tenant mismatch")
+        group_name = spawner.user.name + "-workspace"
+        group_path = f"/apis/scheduling.volcano.sh/v1beta1/namespaces/tenant-{tenant}/podgroups"
+        existing = await kubernetes_request("GET", group_path + "/" + group_name)
+        if existing.status_code == 404:
+            created = await kubernetes_request("POST", group_path, {
+                "apiVersion": "scheduling.volcano.sh/v1beta1", "kind": "PodGroup",
+                "metadata": {"name": group_name, "labels": {
+                    "carrot.ai/tenant-id": tenant, "carrot.ai/notebook-owner": spawner.user.name,
+                    "carrot.ai/managed-by": "jupyterhub",
+                }},
+                "spec": {"queue": f"tenant-{tenant}", "minMember": 1,
+                         "minResources": {"cpu": "500m", "memory": "1G"}},
+            })
+            created.raise_for_status()
+        else:
+            existing.raise_for_status()
+            if existing.json().get("metadata", {}).get("labels", {}).get("carrot.ai/notebook-owner") != spawner.user.name:
+                raise ValueError("PodGroup owner mismatch")
         spawner.namespace = f"tenant-{tenant}"
         spawner.service_account = "tenant-notebook"
+        spawner.automount_service_account_token = False
         spawner.scheduler_name = "volcano"
         spawner.extra_labels = {
             "carrot.ai/tenant-id": tenant,
             "carrot.ai/workload": "notebook",
             "carrot.ai/managed-by": "jupyterhub",
+            "carrot.ai/notebook-owner": spawner.user.name,
         }
         spawner.extra_annotations = {
             "scheduling.volcano.sh/queue-name": f"tenant-{tenant}",
+            "scheduling.k8s.io/group-name": group_name,
         }
+        # Do not replay a short-lived spawn grant on a future browser restart.
+        spawner.user_options = {}
+
+    async def cleanup_podgroup(spawner):
+        path = f"/apis/scheduling.volcano.sh/v1beta1/namespaces/{spawner.namespace}/podgroups/{spawner.user.name}-workspace"
+        response = await kubernetes_request("DELETE", path)
+        if response.status_code != 404:
+            response.raise_for_status()
 
     c.JupyterHub.authenticator_class = PlatformJWTAuthenticator
     c.Authenticator.enable_auth_state = True
     c.JupyterHub.spawner_class = "kubespawner.KubeSpawner"
     c.Spawner.pre_spawn_hook = configure_tenant_workspace
+    c.Spawner.post_stop_hook = cleanup_podgroup
+    c.JupyterHub.allow_named_servers = True
+    c.JupyterHub.named_server_limit_per_user = 1
+    c.JupyterHub.services = [{"name": "carrot-platform", "api_token": os.environ["PLATFORM_API_TOKEN"]}]
+    c.JupyterHub.load_roles = [{"name": "carrot-workspaces", "services": ["carrot-platform"],
+                               "scopes": ["admin:users", "admin:servers"]}]
+    c.JupyterHub.hub_bind_url = "http://0.0.0.0:8081"
+    c.JupyterHub.hub_connect_url = "http://jupyterhub.jupyterhub.svc.cluster.local:8081"
+    c.JupyterHub.db_url = "sqlite:////srv/jupyterhub/jupyterhub.sqlite"
+    c.JupyterHub.cookie_secret_file = "/srv/jupyterhub/jupyterhub_cookie_secret"
+    c.KubeSpawner.enable_user_namespaces = True
+    c.KubeSpawner.automount_service_account_token = False
+    c.KubeSpawner.storage_pvc_ensure = True
+    c.KubeSpawner.storage_capacity = "10Gi"
+    c.KubeSpawner.delete_pvc = False
+    c.KubeSpawner.cpu_guarantee = 0.5
+    c.KubeSpawner.cpu_limit = 1
+    c.KubeSpawner.mem_guarantee = "1G"
+    c.KubeSpawner.mem_limit = "2G"
     c.KubeSpawner.image = os.environ.get("NOTEBOOK_IMAGE", "quay.io/jupyter/base-notebook:python-3.11")
     c.KubeSpawner.default_url = "/lab"
 ---
@@ -92,6 +207,8 @@ metadata:
   namespace: jupyterhub
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: jupyterhub
@@ -101,13 +218,29 @@ spec:
         app: jupyterhub
     spec:
       serviceAccountName: jupyterhub
+      securityContext:
+        fsGroup: 1000
       containers:
         - name: hub
           image: quay.io/jupyterhub/k8s-hub:3.3.8
           args: ["jupyterhub", "-f", "/etc/jupyterhub/jupyterhub_config.py"]
           env:
             - name: PLATFORM_INTROSPECTION_URL
-              value: http://controlplane.default.svc.cluster.local:8080/api/v1/auth/introspect
+              value: http://controlplane.default.svc.cluster.local:8080/internal/notebooks/introspect
+            - name: PLATFORM_LOGIN_URL
+              value: http://controlplane.default.svc.cluster.local:8080/api/v1/auth/login
+            - name: PLATFORM_LOGOUT_URL
+              value: http://controlplane.default.svc.cluster.local:8080/api/v1/auth/logout
+            - name: PLATFORM_HUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: jupyterhub-secrets
+                  key: platform-hub-token
+            - name: PLATFORM_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: jupyterhub-secrets
+                  key: api-token
             - name: JUPYTERHUB_CRYPT_KEY
               valueFrom:
                 secretKeyRef:
@@ -116,6 +249,8 @@ spec:
           ports:
             - name: http
               containerPort: 8000
+            - name: hub-api
+              containerPort: 8081
           readinessProbe:
             httpGet:
               path: /hub/health
@@ -123,10 +258,15 @@ spec:
           volumeMounts:
             - name: config
               mountPath: /etc/jupyterhub
+            - name: data
+              mountPath: /srv/jupyterhub
       volumes:
         - name: config
           configMap:
             name: jupyterhub-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: jupyterhub-data
 ---
 apiVersion: v1
 kind: Service
@@ -140,3 +280,49 @@ spec:
     - name: http
       port: 80
       targetPort: 8000
+    - name: hub-api
+      port: 8081
+      targetPort: 8081
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: jupyterhub-data
+  namespace: jupyterhub
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: hub-access
+  namespace: jupyterhub
+spec:
+  podSelector:
+    matchLabels:
+      app: jupyterhub
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8000
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: default
+          podSelector:
+            matchLabels:
+              app: controlplane
+        - namespaceSelector:
+            matchExpressions:
+              - key: carrot.ai/tenant-id
+                operator: Exists
+          podSelector:
+            matchLabels:
+              carrot.ai/workload: notebook
+      ports:
+        - protocol: TCP
+          port: 8081

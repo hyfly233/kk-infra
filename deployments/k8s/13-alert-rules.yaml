@@ -6,6 +6,35 @@ metadata:
 data:
   alerts.yml: |
     groups:
+      - name: carrot-cluster-health
+        rules:
+          - alert: ClusterAgentOffline
+            expr: carrot_cluster_alert{kind="offline"} == 1
+            labels:
+              severity: critical
+            annotations:
+              summary: "集群 {{ $labels.cluster_id }} 超过 90 秒未收到心跳"
+          - alert: ClusterCapacityUnhealthy
+            expr: carrot_cluster_alert{kind="unhealthy"} == 1
+            for: 30s
+            labels:
+              severity: critical
+            annotations:
+              summary: "集群 {{ $labels.cluster_id }} 容量采集或节点健康异常"
+          - alert: ClusterTelemetryUnavailable
+            expr: carrot_cluster_alert{kind="telemetry"} == 1
+            for: 2m
+            labels:
+              severity: warning
+            annotations:
+              summary: "集群 {{ $labels.cluster_id }} Prometheus/DCGM 遥测不可用"
+          - alert: ClusterMonitorScrapeFailed
+            expr: up{job="carrot-cluster-monitor"} == 0
+            for: 2m
+            labels:
+              severity: warning
+            annotations:
+              summary: "集群告警指标抓取失败，请检查控制面连通性及监控 token 到期时间"
       - name: carrot-inference-guards
         rules:
           - alert: HighInferenceErrorRate

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"kk-infra/lib/errcode"
+	"kk-infra/lib/middleware"
 	"kk-infra/services/gateway/internal/router"
 )
 
@@ -138,6 +139,14 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, tenantID string)
 		return
 	}
 	upReq.Header.Set("Content-Type", "application/json")
+	sessionID := r.Header.Get("X-Carrot-Session-Id")
+	if sessionID == "" {
+		sessionID = middleware.GetRequestID(r.Context())
+	}
+	if sessionID != "" {
+		upReq.Header.Set("X-Carrot-Session-Id", sessionID)
+		upReq.Header.Set("X-Request-Id", sessionID)
+	}
 	// 透传 Authorization（若上游需要）
 
 	start := time.Now()

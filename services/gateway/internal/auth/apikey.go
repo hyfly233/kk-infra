@@ -23,7 +23,7 @@ var ErrKeyDisabled = errors.New("api key disabled")
 // APIKey 存储模型
 type APIKey struct {
 	ID         string    `json:"id"`
-	KeyHash    string    `json:"keyHash"` // SHA-256，不存明文
+	KeyHash    string    `json:"-"` // SHA-256，不返回管理 API
 	TenantID   string    `json:"tenantId"`
 	Models     []string  `json:"models"` // 可访问模型白名单（空 = 全部）
 	CreatedAt  time.Time `json:"createdAt"`
@@ -249,7 +249,7 @@ func NewManagerWithStore(s Store) *Manager {
 
 // IssueResult 创建结果（明文只出现一次）
 type IssueResult struct {
-	Key    string `json:"key"`    // 明文 Key，仅此一次
+	Key    string `json:"key"` // 明文 Key，仅此一次
 	KeyID  string `json:"keyId"`
 	Tenant string `json:"tenant"`
 }
@@ -302,6 +302,15 @@ func (m *Manager) Disable(keyID string) error {
 	}
 	k.Disabled = true
 	return m.store.Update(k)
+}
+
+// TenantForKey reads immutable ownership without exposing credential hashes.
+func (m *Manager) TenantForKey(keyID string) (string, error) {
+	k, err := m.store.GetByID(keyID)
+	if err != nil {
+		return "", err
+	}
+	return k.TenantID, nil
 }
 
 // SetModels 设置 Key 的模型白名单（空 = 全部模型可访问）

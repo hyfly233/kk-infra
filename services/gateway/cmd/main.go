@@ -27,6 +27,7 @@ func main() {
 	addr := flag.String("addr", ":8083", "监听地址")
 	ratePerMinute := flag.Int("rate-per-minute", 0, "每租户每分钟限流（0=不限）")
 	storage := flag.String("storage", "memory", "存储后端: memory | postgres")
+	authSecret := flag.String("auth-secret", os.Getenv("CARROT_AUTH_SECRET"), "管理接口 JWT 签名密钥，空值仅供不安全开发模式")
 	observabilityURL := flag.String("observability-url", "", "observability 服务地址（指标上报，空则跳过）")
 	flag.Parse()
 
@@ -67,7 +68,9 @@ func main() {
 	}
 	var metricsSink proxy.MetricsSink
 	if *observabilityURL != "" {
-		metricsSink = sink.NewHTTPSink(*observabilityURL, logger)
+		httpSink := sink.NewHTTPSink(*observabilityURL, logger)
+		httpSink.SetServiceSecret(*authSecret)
+		metricsSink = httpSink
 		logger.Info("指标上报到 observability", "url", *observabilityURL)
 	}
 	p := proxy.NewProxy(routes, logger, metricsSink)
@@ -82,6 +85,10 @@ func main() {
 		p.RatePerMinute = *ratePerMinute
 	}
 	srv := server.NewServer(keys, routes, p, logger)
+	srv.SetAuthSecret(*authSecret)
+	if *authSecret == "" {
+		logger.Warn("gateway 管理接口鉴权未启用，仅限可信本地开发环境")
+	}
 
 	httpSrv := &http.Server{
 		Addr:              *addr,

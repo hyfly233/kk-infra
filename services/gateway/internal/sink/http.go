@@ -5,6 +5,7 @@ package sink
 import (
 	"bytes"
 	"encoding/json"
+	platformauth "kk-infra/lib/auth"
 	"log/slog"
 	"net/http"
 	"time"
@@ -12,9 +13,15 @@ import (
 
 // HTTPSink 实现 proxy.MetricsSink，通过 HTTP 上报到 observability。
 type HTTPSink struct {
-	baseURL string
-	client  *http.Client
-	logger  *slog.Logger
+	baseURL       string
+	client        *http.Client
+	logger        *slog.Logger
+	serviceSecret string
+}
+
+func (h *HTTPSink) SetServiceSecret(secret string) {
+	h.serviceSecret = secret
+	h.client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 }
 
 // NewHTTPSink 创建 HTTP 指标上报器。baseURL 形如 http://localhost:8084。
@@ -50,6 +57,14 @@ func (h *HTTPSink) Record(tenantID, deploymentID, model string, latencyMs int64,
 			return
 		}
 		req.Header.Set("Content-Type", "application/json")
+		if h.serviceSecret != "" {
+			token, err := platformauth.IssueServiceToken(h.serviceSecret, "gateway", "observability")
+			if err != nil {
+				h.logger.Warn("指标服务身份签发失败")
+				return
+			}
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
 		resp, err := h.client.Do(req)
 		if err != nil {
 			h.logger.Warn("指标上报失败", "deploymentId", deploymentID, "err", err)

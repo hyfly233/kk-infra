@@ -5,12 +5,14 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	"kk-infra/lib/apitypes"
+	platformauth "kk-infra/lib/auth"
 	"kk-infra/lib/errcode"
 	"kk-infra/lib/middleware"
 	"kk-infra/services/gateway/internal/auth"
@@ -20,10 +22,11 @@ import (
 
 // Server 网关服务
 type Server struct {
-	keys   *auth.Manager
-	routes *router.Table
-	proxy  *proxy.Proxy
-	logger *slog.Logger
+	keys       *auth.Manager
+	routes     *router.Table
+	proxy      *proxy.Proxy
+	logger     *slog.Logger
+	authSecret string
 }
 
 // NewServer 创建网关服务
@@ -39,7 +42,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/models", s.authRequired(s.handleListModels))
 	mux.HandleFunc("POST /v1/chat/completions", s.authRequired(s.handleChatCompletions))
 
-	// 内部管理 API（控制面调用，MVP 不做内部鉴权）
+	// 内部管理 API（启用认证时限定控制面服务身份）。
 	mux.HandleFunc("POST /internal/routes", s.handleRegisterRoute)
 	mux.HandleFunc("DELETE /internal/routes/{model}", s.handleUnregisterRoute)
 
@@ -52,7 +55,7 @@ func (s *Server) Handler() http.Handler {
 
 	return middleware.WithRequestID(
 		middleware.Recover(s.logger,
-			middleware.AccessLog(s.logger, mux),
+			middleware.AccessLog(s.logger, s.managementRequired(mux)),
 		),
 	)
 }
@@ -138,7 +141,7 @@ func (s *Server) handleRegisterRoute(w http.ResponseWriter, r *http.Request) {
 		apitypes.WriteResult(w, r, nil, errcode.Wrap(errcode.ErrInternal, "保存网关路由失败", err))
 		return
 	}
-	s.logger.Info("注册模型路由", "model", req.Model, "endpoint", req.Endpoint)
+	s.logger.Info("注册模型路由", "model", req.Model)
 	apitypes.WriteResult(w, r, map[string]bool{"registered": true}, nil)
 }
 
@@ -157,12 +160,24 @@ type issueKeyReq struct {
 }
 
 func (s *Server) handleIssueKey(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	var req issueKeyReq
 	if r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192)).Decode(&req); err != nil && err != io.EOF {
+			apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, "请求体解析失败"))
+			return
+		}
 	}
 	if req.TenantID == "" {
-		req.TenantID = "default"
+		if c := managementClaims(r); c != nil {
+			req.TenantID = c.TenantID
+		} else {
+			req.TenantID = "default"
+		}
+	}
+	if c := managementClaims(r); c != nil && (req.TenantID == "" || (c.Role != platformauth.RolePlatformAdmin && c.TenantID != req.TenantID)) {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "不能为其他租户创建 Key"))
+		return
 	}
 	res, err := s.keys.Issue(req.TenantID)
 	if err != nil {
@@ -173,10 +188,24 @@ func (s *Server) handleIssueKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListKeys(w http.ResponseWriter, r *http.Request) {
-	apitypes.WriteResult(w, r, s.keys.List(), nil)
+	w.Header().Set("Cache-Control", "no-store")
+	keys := s.keys.List()
+	if c := managementClaims(r); c != nil && c.Role != platformauth.RolePlatformAdmin {
+		filtered := make([]auth.APIKey, 0)
+		for _, key := range keys {
+			if key.TenantID == c.TenantID {
+				filtered = append(filtered, key)
+			}
+		}
+		keys = filtered
+	}
+	apitypes.WriteResult(w, r, keys, nil)
 }
 
 func (s *Server) handleDisableKey(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.keyOwner(w, r); !ok {
+		return
+	}
 	if err := s.keys.Disable(r.PathValue("keyId")); err != nil {
 		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrNotFound, "Key 不存在"))
 		return
@@ -185,9 +214,14 @@ func (s *Server) handleDisableKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
-	tenant := r.URL.Query().Get("tenant")
-	if tenant == "" {
-		tenant = "default"
+	w.Header().Set("Cache-Control", "no-store")
+	tenant, ok := s.keyOwner(w, r)
+	if !ok {
+		return
+	}
+	if requested := r.URL.Query().Get("tenant"); requested != "" && requested != tenant {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, "Key 轮换不能变更租户"))
+		return
 	}
 	res, err := s.keys.Rotate(r.PathValue("keyId"), tenant)
 	if err != nil {
@@ -199,6 +233,9 @@ func (s *Server) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 
 // handleSetKeyModels 设置 Key 的模型白名单（R2-4 模型授权）
 func (s *Server) handleSetKeyModels(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.keyOwner(w, r); !ok {
+		return
+	}
 	var req struct {
 		Models []string `json:"models"`
 	}

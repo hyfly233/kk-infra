@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 模型管理：列表 + 注册模型（管理员）
+// 模型管理：列表 + 注册模型
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { createModel, deleteModel, fetchModels } from '../api'
@@ -8,7 +8,7 @@ import type { Model } from '../types'
 import { fmtTime } from '../utils/status'
 
 const router = useRouter()
-const { isAdmin } = useAuth()
+const { canWrite } = useAuth()
 
 const loading = ref(true)
 const error = ref('')
@@ -81,7 +81,7 @@ onMounted(load)
       <h2>模型管理</h2>
       <div class="flex">
         <input v-model="search" placeholder="搜索模型..." class="search-input" />
-        <button v-if="isAdmin" class="primary" @click="showCreate = true">注册模型</button>
+        <button v-if="canWrite" class="primary" @click="showCreate = true">注册模型</button>
       </div>
     </div>
 
@@ -102,7 +102,7 @@ onMounted(load)
             <td>
               <div class="flex">
                 <button class="ghost" @click="router.push(`/models/${m.id}`)">详情</button>
-                <button v-if="isAdmin" class="danger" @click="removeModel(m)">删除</button>
+                <button v-if="canWrite && m.tenantId" class="danger" @click="removeModel(m)">删除</button>
               </div>
             </td>
           </tr>

@@ -2,20 +2,23 @@
 // 模型详情：基本信息 + 版本列表 + 注册版本/校验（管理员）
 import { onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { createVersion, deleteVersion, fetchModel, fetchVersions, releaseVersion, validateVersion } from '../api'
+import { approveRelease, createVersion, deleteVersion, fetchLatestRelease, fetchModel, fetchVersions, startRelease, validateVersion } from '../api'
+import type { ReleaseRecord } from '../api'
 import { useAuth } from '../composables/useAuth'
 import type { Model, ModelVersion } from '../types'
 import { fmtTime, versionBadge } from '../utils/status'
 
 const route = useRoute()
 const router = useRouter()
-const { isAdmin } = useAuth()
+const { isAdmin, canWrite } = useAuth()
 
 const modelId = route.params.id as string
 const loading = ref(true)
 const error = ref('')
 const model = ref<Model | null>(null)
 const versions = ref<ModelVersion[]>([])
+const releases = ref<Record<string, ReleaseRecord>>({})
+const releaseBusy = ref(false)
 
 // 注册版本弹窗
 const showCreate = ref(false)
@@ -38,6 +41,8 @@ async function load() {
     const [m, vs] = await Promise.all([fetchModel(modelId), fetchVersions(modelId)])
     model.value = m
     versions.value = vs
+    const latest = await Promise.all(vs.map((version) => fetchLatestRelease(version.id)))
+    releases.value = Object.fromEntries(latest.flat().map((record) => [record.modelVersionId, record]))
   } catch (e) {
     error.value = (e as Error).message
   } finally {
@@ -85,12 +90,29 @@ async function doValidate(v: ModelVersion) {
 }
 
 async function doRelease(v: ModelVersion) {
-  if (!confirm(`确认发布版本「${v.version}」？发布后该版本可被部署。`)) return
+  if (!confirm(`为版本「${v.version}」启动校验、探针和基准流水线？通过后仍需管理员人工审批。`)) return
+  releaseBusy.value = true
   try {
-    await releaseVersion(v.id)
-    await load()
+    await startRelease(v.id, v.tenantId)
   } catch (e) {
-    alert(`发布失败: ${(e as Error).message}`)
+    alert(`流水线失败: ${(e as Error).message}`)
+  } finally {
+    await load()
+    releaseBusy.value = false
+  }
+}
+
+async function doApproval(v: ModelVersion, approved: boolean) {
+  const release = releases.value[v.id]
+  if (!release || !confirm(`${approved ? '批准' : '拒绝'}版本「${v.version}」的发布？`)) return
+  releaseBusy.value = true
+  try {
+    await approveRelease(release.id, approved)
+  } catch (e) {
+    alert(`审批失败: ${(e as Error).message}`)
+  } finally {
+    await load()
+    releaseBusy.value = false
   }
 }
 
@@ -115,7 +137,7 @@ onMounted(load)
         <h2>模型：{{ model?.name ?? '...' }}</h2>
         <p class="dim">{{ model?.description }}</p>
       </div>
-      <button v-if="isAdmin" class="primary" @click="showCreate = true">注册版本</button>
+      <button v-if="canWrite && model?.tenantId" class="primary" @click="showCreate = true">注册版本</button>
     </div>
 
     <div v-if="error" class="error-box">{{ error }}</div>
@@ -141,17 +163,23 @@ onMounted(load)
               <td>
                 <div class="flex">
                   <button
-                    v-if="isAdmin && v.status === 'REGISTERED'"
+                    v-if="canWrite && model?.tenantId && v.status === 'REGISTERED'"
                     class="success"
                     @click="doValidate(v)"
                   >校验</button>
                   <button
-                    v-if="isAdmin && v.status === 'VALIDATED'"
+                    v-if="canWrite && model?.tenantId && ['REGISTERED', 'VALIDATED'].includes(v.status) && releases[v.id]?.status !== 'PENDING_APPROVAL'"
                     class="success"
+                    :disabled="releaseBusy"
                     @click="doRelease(v)"
-                  >发布</button>
+                  >启动发布流水线</button>
+                  <template v-if="isAdmin && releases[v.id]?.status === 'PENDING_APPROVAL'">
+                    <button :disabled="releaseBusy" class="success" @click="doApproval(v, true)">审批发布</button>
+                    <button :disabled="releaseBusy" class="danger" @click="doApproval(v, false)">拒绝</button>
+                  </template>
+                  <span v-if="releases[v.id]" class="dim">流水线：{{ releases[v.id]?.status }}</span>
                   <button
-                    v-if="isAdmin && v.status !== 'RELEASED' && v.status !== 'VALIDATED'"
+                    v-if="canWrite && model?.tenantId && v.status !== 'RELEASED' && v.status !== 'VALIDATED'"
                     class="danger"
                     @click="removeVersion(v)"
                   >删除</button>

@@ -43,11 +43,12 @@ const gpuEnough = computed(() => availableGPU.value >= needGPU.value)
 const selectedVersionObj = computed(() =>
   versions.value.find((v) => v.id === selectedVersion.value),
 )
+const deploymentTenant = computed(() => selectedVersionObj.value?.tenantId || '')
 
 async function loadModels() {
   loadingModels.value = true
   try {
-    models.value = await fetchModels()
+    models.value = (await fetchModels()).filter((model) => model.tenantId)
     const g = await fetchGPUs()
     gpus.value = g
     // 默认选第一个模型
@@ -119,7 +120,7 @@ async function deploy() {
       idempotencyKey: idempotencyKey.value,
       name: svcName.value.trim(),
       modelVersionId: selectedVersion.value,
-      tenantId: 'default',
+      tenantId: deploymentTenant.value,
       replicas: replicas.value,
       startupArgs: args,
     })
@@ -264,8 +265,8 @@ onMounted(loadModels)
           <div><strong>内存：</strong>{{ (memoryMB / 1024).toFixed(0) }} GB/副本</div>
           <div><strong>上下文：</strong>{{ contextLength }}</div>
           <div><strong>启动参数：</strong>{{ startupArgs || '-' }}</div>
-          <div><strong>租户：</strong>default</div>
-          <div><strong>命名空间：</strong>tenant-default</div>
+          <div><strong>租户：</strong>{{ deploymentTenant }}</div>
+          <div><strong>命名空间：</strong>tenant-{{ deploymentTenant }}</div>
           <div><strong>幂等键：</strong><span class="mono">{{ idempotencyKey }}</span></div>
         </div>
         <p class="dim" style="margin-bottom: 16px">

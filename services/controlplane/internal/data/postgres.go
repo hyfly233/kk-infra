@@ -42,7 +42,7 @@ func scanDeployment(row interface{ Scan(...any) error }) (*domain.ModelDeploymen
 	var startupArgs string
 	if err := row.Scan(
 		&d.ID, &d.Name, &d.ModelID, &d.ModelVersionID, &d.ModelName, &d.ModelVersion,
-		&d.TenantID, &d.Namespace, &d.Replicas,
+		&d.TenantID, &d.Namespace, &d.ClusterID, &d.Replicas,
 		&d.Resource.GPUType, &d.Resource.GPUCount, &d.Resource.MemoryMB,
 		&d.Runtime, &d.ServingMode, &startupArgs, &d.Endpoint, &d.StableEndpoint, &d.CanaryEndpoint, &d.RolloutStatus, &d.Status, &d.Generation,
 		&d.Diagnostics, &d.CreatedAt, &d.UpdatedAt,
@@ -55,7 +55,7 @@ func scanDeployment(row interface{ Scan(...any) error }) (*domain.ModelDeploymen
 }
 
 const deploymentCols = `id, name, model_id, model_version_id, model_name, model_version,
-	tenant_id, namespace, replicas, gpu_type, gpu_count, memory_mb,
+	tenant_id, namespace, cluster_id, replicas, gpu_type, gpu_count, memory_mb,
 	runtime, serving_mode, startup_args, endpoint, stable_endpoint, canary_endpoint, rollout_status, status, generation, diagnostics, created_at, updated_at`
 
 // args 序列化部署对象为 SQL 参数
@@ -63,7 +63,7 @@ func (r *PostgresDeploymentRepository) args(d *domain.ModelDeployment) []interfa
 	argsJSON, _ := json.Marshal(d.StartupArgs)
 	return []interface{}{
 		d.ID, d.Name, d.ModelID, d.ModelVersionID, d.ModelName, d.ModelVersion,
-		d.TenantID, d.Namespace, d.Replicas,
+		d.TenantID, d.Namespace, d.ClusterID, d.Replicas,
 		d.Resource.GPUType, d.Resource.GPUCount, d.Resource.MemoryMB,
 		d.Runtime, d.ServingMode, string(argsJSON), d.Endpoint, d.StableEndpoint, d.CanaryEndpoint, d.RolloutStatus, d.Status, d.Generation,
 		d.Diagnostics, d.CreatedAt, d.UpdatedAt,
@@ -80,7 +80,7 @@ func (r *PostgresDeploymentRepository) Create(d *domain.ModelDeployment) error {
 		}
 	}
 	_, err = r.db.Exec(
-		`INSERT INTO deployments (`+deploymentCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)`,
+		`INSERT INTO deployments (`+deploymentCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)`,
 		r.args(d)...,
 	)
 	return mapDeployErr(err)
@@ -102,16 +102,25 @@ func (r *PostgresDeploymentRepository) Update(d *domain.ModelDeployment) error {
 	// 更新除 id/name/created_at 外的全部字段
 	_, err := r.db.Exec(
 		`UPDATE deployments SET model_id=$2, model_version_id=$3, model_name=$4, model_version=$5,
-		 tenant_id=$6, namespace=$7, replicas=$8, gpu_type=$9, gpu_count=$10, memory_mb=$11,
-		 runtime=$12, serving_mode=$13, startup_args=$14, endpoint=$15, stable_endpoint=$16, canary_endpoint=$17, rollout_status=$18, status=$19, generation=$20, diagnostics=$21, updated_at=$22
+		 tenant_id=$6, namespace=$7, cluster_id=$8, replicas=$9, gpu_type=$10, gpu_count=$11, memory_mb=$12,
+		 runtime=$13, serving_mode=$14, startup_args=$15, endpoint=$16, stable_endpoint=$17, canary_endpoint=$18, rollout_status=$19, status=$20, generation=$21, diagnostics=$22, updated_at=$23
 		 WHERE id=$1`,
 		d.ID, d.ModelID, d.ModelVersionID, d.ModelName, d.ModelVersion,
-		d.TenantID, d.Namespace, d.Replicas,
+		d.TenantID, d.Namespace, d.ClusterID, d.Replicas,
 		d.Resource.GPUType, d.Resource.GPUCount, d.Resource.MemoryMB,
 		d.Runtime, d.ServingMode, mustJSON(d.StartupArgs), d.Endpoint, d.StableEndpoint, d.CanaryEndpoint, d.RolloutStatus, d.Status, d.Generation,
 		d.Diagnostics, time.Now(),
 	)
 	return mapDeployErr(err)
+}
+
+func (r *PostgresDeploymentRepository) ClaimClusterRebuild(id, fromCluster, toCluster string, at time.Time) (*domain.ModelDeployment, error) {
+	row := r.db.QueryRow(`UPDATE deployments SET cluster_id=$3,status='SUBMITTING',diagnostics='',endpoint='',stable_endpoint='',canary_endpoint='',rollout_status='',generation=generation+1,updated_at=$4 WHERE id=$1 AND cluster_id=$2 AND status='FAILED' AND diagnostics LIKE '目标集群不可用:%' RETURNING `+deploymentCols, id, fromCluster, toCluster, at)
+	d, err := scanDeployment(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrConflict
+	}
+	return d, mapDeployErr(err)
 }
 
 func (r *PostgresDeploymentRepository) List(tenantID string) ([]*domain.ModelDeployment, error) {

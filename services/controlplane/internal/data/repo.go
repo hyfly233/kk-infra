@@ -4,7 +4,9 @@ package data
 
 import (
 	"errors"
+	"strings"
 	"sync"
+	"time"
 
 	"kk-infra/lib/domain"
 )
@@ -21,6 +23,7 @@ type DeploymentRepository interface {
 	Get(id string) (*domain.ModelDeployment, error)
 	GetByName(name string) (*domain.ModelDeployment, error)
 	Update(d *domain.ModelDeployment) error
+	ClaimClusterRebuild(id, fromCluster, toCluster string, at time.Time) (*domain.ModelDeployment, error)
 	List(tenantID string) ([]*domain.ModelDeployment, error)
 	Delete(id string) error
 	// 事件
@@ -129,6 +132,25 @@ func (r *MemoryDeploymentRepository) Update(d *domain.ModelDeployment) error {
 	}
 	r.deploys[d.ID] = d
 	return nil
+}
+
+func (r *MemoryDeploymentRepository) ClaimClusterRebuild(id, fromCluster, toCluster string, at time.Time) (*domain.ModelDeployment, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	d, ok := r.deploys[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if d.ClusterID != fromCluster || d.Status != domain.DeploymentStatusFailed || !strings.HasPrefix(d.Diagnostics, "目标集群不可用:") {
+		return nil, ErrConflict
+	}
+	updated := *d
+	updated.ClusterID, updated.Status, updated.Diagnostics = toCluster, domain.DeploymentStatusSubmitting, ""
+	updated.Endpoint, updated.StableEndpoint, updated.CanaryEndpoint, updated.RolloutStatus = "", "", "", ""
+	updated.Generation++
+	updated.UpdatedAt = at
+	r.deploys[id] = &updated
+	return &updated, nil
 }
 
 func (r *MemoryDeploymentRepository) List(tenantID string) ([]*domain.ModelDeployment, error) {

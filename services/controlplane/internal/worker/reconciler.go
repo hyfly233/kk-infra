@@ -22,6 +22,7 @@ type Reconciler struct {
 	startTimeout time.Duration
 	// 删除超时：DELETING 状态超过该时长仍未删除 → 强制失败/重试（R2-5）
 	deleteTimeout time.Duration
+	orphans       map[string]bool
 }
 
 // NewReconciler 创建对账器
@@ -33,6 +34,7 @@ func NewReconciler(repo data.DeploymentRepository, deployUse *biz.DeploymentUseC
 		interval:      interval,
 		startTimeout:  5 * time.Minute, // STARTING 5 分钟未就绪判失败
 		deleteTimeout: 3 * time.Minute, // DELETING 3 分钟未完成则重试
+		orphans:       map[string]bool{},
 	}
 }
 
@@ -70,24 +72,31 @@ func (r *Reconciler) Run(ctx context.Context) {
 func (r *Reconciler) reconcileOrphans(ctx context.Context) {
 	local := map[string]bool{}
 	deploys, err := r.repo.List("")
-	if err == nil {
-		for _, d := range deploys {
-			if d.Status != domain.DeploymentStatusDeleted {
-				local[d.Name] = true
-			}
+	if err != nil {
+		r.logger.Warn("孤儿检测：读取部署记录失败", "err", err)
+		return
+	}
+	for _, d := range deploys {
+		if d.Status != domain.DeploymentStatusDeleted {
+			local[d.ClusterID+"/"+d.Namespace+"/"+d.Name] = true
 		}
 	}
-	// 扫描默认租户命名空间
-	remote, err := r.deployUse.ListK8sDeployments(ctx, "tenant-default")
+	remote, err := r.deployUse.ListK8sDeployments(ctx, "*")
 	if err != nil {
 		r.logger.Warn("孤儿检测：扫描 K8s 部署失败", "err", err)
 		return
 	}
-	for name := range remote {
-		if !local[name] {
-			r.logger.Warn("检测到孤儿 K8s 部署（本地无记录）", "deployment", name)
+	found := map[string]bool{}
+	for identity := range remote {
+		if !local[identity] {
+			found[identity] = true
+			if !r.orphans[identity] {
+				r.logger.Warn("检测到孤儿 K8s 部署（本地无记录）", "resource", identity)
+				r.deployUse.RecordOrphan(identity)
+			}
 		}
 	}
+	r.orphans = found
 }
 
 // reconcileAll 对账所有活跃部署
@@ -101,6 +110,10 @@ func (r *Reconciler) reconcileAll(ctx context.Context) {
 	for _, d := range deploys {
 		// 终态（DELETED）跳过
 		if d.Status == domain.DeploymentStatusDeleted {
+			continue
+		}
+		if d.Status == domain.DeploymentStatusScaling && now.Sub(d.UpdatedAt) > r.startTimeout {
+			r.deployUse.FailDeployment(d.ID, "扩缩容操作超时或控制面中断；保留容量预留，请核实实际副本后重试或删除")
 			continue
 		}
 		// R2-5：STARTING 超时 → FAILED

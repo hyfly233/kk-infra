@@ -26,10 +26,11 @@ import (
 
 // Server observability HTTP 服务
 type Server struct {
-	store  *metrics.Store
-	logger *slog.Logger
-	prom   *prometheus.Client // 可为 nil（无 Prometheus 时降级内存存储）
-	usage  usage.Store
+	store      *metrics.Store
+	logger     *slog.Logger
+	prom       *prometheus.Client // 可为 nil（无 Prometheus 时降级内存存储）
+	usage      usage.Store
+	authSecret string
 }
 
 func (s *Server) SetUsageStore(store usage.Store) { s.usage = store }
@@ -61,7 +62,7 @@ func (s *Server) Handler() http.Handler {
 
 	return middleware.WithRequestID(
 		middleware.Recover(s.logger,
-			middleware.AccessLog(s.logger, mux),
+			middleware.AccessLog(s.logger, s.serviceRequired(mux)),
 		),
 	)
 }

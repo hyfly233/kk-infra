@@ -27,12 +27,17 @@ func main() {
 	controlplaneURL := flag.String("controlplane-url", "", "controlplane 地址（如 http://localhost:8080），配置后启用 GPU 指标采集")
 	prometheusURL := flag.String("prometheus-url", "", "Prometheus 地址（如 http://localhost:9090），配置后 GPU 查询走 DCGM 指标")
 	storage := flag.String("storage", "memory", "存储后端: memory | postgres")
+	authSecret := flag.String("auth-secret", os.Getenv("CARROT_AUTH_SECRET"), "内部管理接口服务 JWT 密钥，空值仅供不安全开发模式")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 	store := metrics.NewStore(*retention)
 	srv := server.NewServer(store, logger)
+	srv.SetAuthSecret(*authSecret)
+	if *authSecret == "" {
+		logger.Warn("observability 服务鉴权未启用，仅限可信本地开发环境")
+	}
 	var usageStore usage.Store = usage.NewMemoryStore()
 	if *storage == "postgres" {
 		db, err := platformstore.Open(platformstore.DefaultConfig())
@@ -68,7 +73,12 @@ func main() {
 
 	// GPU 指标采集：定期从 controlplane 拉取 GPU 资源状态
 	if *controlplaneURL != "" {
-		col := collector.NewGPUCollector(*controlplaneURL+"/api/v1/resources/gpus", logger, 15*time.Second)
+		sourcePath := "/api/v1/resources/gpus"
+		if *authSecret != "" {
+			sourcePath = "/internal/resources/gpus"
+		}
+		col := collector.NewGPUCollector(*controlplaneURL+sourcePath, logger, 15*time.Second)
+		col.SetServiceSecret(*authSecret)
 		col.OnGPU = func(view apitypes.GPUResourcesView) {
 			for _, n := range view.Nodes {
 				store.RecordGPU(metrics.GPUSample{

@@ -12,17 +12,24 @@ import (
 	"time"
 
 	"kk-infra/lib/apitypes"
+	platformauth "kk-infra/lib/auth"
 )
 
 // GPUCollector 定期从 controlplane 拉取 GPU 状态并上报。
 type GPUCollector struct {
-	sourceURL string // controlplane /api/v1/resources/gpus
-	client    *http.Client
-	logger    *slog.Logger
-	interval  time.Duration
+	sourceURL     string // controlplane /api/v1/resources/gpus
+	client        *http.Client
+	logger        *slog.Logger
+	interval      time.Duration
+	serviceSecret string
 
 	// OnGPU 每轮采集回调（由 observability server 注入存储写入）
 	OnGPU func(view apitypes.GPUResourcesView)
+}
+
+func (c *GPUCollector) SetServiceSecret(secret string) {
+	c.serviceSecret = secret
+	c.client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 }
 
 // NewGPUCollector 创建 GPU 采集器。
@@ -61,6 +68,13 @@ func (c *GPUCollector) collect() {
 	if err != nil {
 		return
 	}
+	if c.serviceSecret != "" {
+		token, err := platformauth.IssueServiceToken(c.serviceSecret, "observability", "controlplane")
+		if err != nil {
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	resp, err := c.client.Do(req)
 	if err != nil {
 		c.logger.Warn("GPU 采集失败", "err", err)
@@ -69,7 +83,7 @@ func (c *GPUCollector) collect() {
 	defer resp.Body.Close()
 
 	var wrap struct {
-		Code int `json:"code"`
+		Code int                       `json:"code"`
 		Data apitypes.GPUResourcesView `json:"data"`
 	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))

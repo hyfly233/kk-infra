@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"regexp"
 	"strings"
@@ -31,27 +32,34 @@ type Capacity struct {
 }
 
 type Cluster struct {
-	ID                 string            `json:"id"`
-	Name               string            `json:"name"`
-	Endpoint           string            `json:"endpoint"`
-	AdapterURL         string            `json:"adapterUrl"`
-	ServingURLTemplate string            `json:"servingUrlTemplate,omitempty"`
-	Labels             map[string]string `json:"labels"`
-	SupportedRuntimes  []string          `json:"supportedRuntimes"`
-	AllowedTenants     []string          `json:"allowedTenants,omitempty"`
-	GPUCapacity        []Capacity        `json:"gpuCapacity"`
-	HealthStatus       string            `json:"healthStatus"`
-	LastHeartbeat      *time.Time        `json:"lastHeartbeat,omitempty"`
-	CreatedAt          time.Time         `json:"createdAt"`
-	UpdatedAt          time.Time         `json:"updatedAt"`
-	Kubeconfig         string            `json:"-"`
+	GPUReservations    []GPUReservation                  `json:"gpuReservations,omitempty"`
+	ID                 string                            `json:"id"`
+	Name               string                            `json:"name"`
+	Endpoint           string                            `json:"endpoint"`
+	AdapterURL         string                            `json:"adapterUrl"`
+	ServingURLTemplate string                            `json:"servingUrlTemplate,omitempty"`
+	Labels             map[string]string                 `json:"labels"`
+	SupportedRuntimes  []string                          `json:"supportedRuntimes"`
+	AllowedTenants     []string                          `json:"allowedTenants,omitempty"`
+	GPUCapacity        []Capacity                        `json:"gpuCapacity"`
+	VolcanoQueues      []domain.VolcanoQueueCapacity     `json:"volcanoQueues,omitempty"`
+	Telemetry          *domain.ClusterTelemetry          `json:"telemetry,omitempty"`
+	DeploymentGPU      []domain.DeploymentGPUObservation `json:"deploymentGpu,omitempty"`
+	HealthStatus       string                            `json:"healthStatus"`
+	LastHeartbeat      *time.Time                        `json:"lastHeartbeat,omitempty"`
+	CreatedAt          time.Time                         `json:"createdAt"`
+	UpdatedAt          time.Time                         `json:"updatedAt"`
+	Kubeconfig         string                            `json:"-"`
 }
 
 type Repository interface {
+	ReserveCapacity(string, GPUReservation, string, time.Time) error
+	ReleaseCapacity(string, string) error
+	GrowCapacity(string, string, string, string, int32, time.Time) error
 	Create(*Cluster, []byte) error
 	List() ([]Cluster, error)
 	Get(string) (Cluster, []byte, error)
-	Report(string, string, []Capacity, time.Time) error
+	Report(string, string, []Capacity, []domain.VolcanoQueueCapacity, *domain.ClusterTelemetry, []domain.DeploymentGPUObservation, time.Time) error
 	SetServingURLTemplate(string, string) error
 	UpdatePolicy(string, map[string]string, []string, []string) error
 	RotateCredentials(string, []byte) error
@@ -220,20 +228,15 @@ func (s *Service) selectCluster(resource domain.Resource, runtime, tenantID stri
 		return Cluster{}, err
 	}
 	var selected *Cluster
-	bestAvailable := int32(0)
+	bestAvailable := int64(0)
 	now := s.now()
 	for i := range all {
 		candidate := &all[i]
 		if candidate.HealthStatus != "healthy" || candidate.LastHeartbeat == nil || now.Sub(*candidate.LastHeartbeat) > 90*time.Second || !contains(candidate.SupportedRuntimes, runtime) || !tenantAllowed(candidate.AllowedTenants, tenantID) || (requireServingRoute && candidate.ServingURLTemplate == "") {
 			continue
 		}
-		available := int32(0)
-		for _, cap := range candidate.GPUCapacity {
-			if cap.GPUType == resource.GPUType {
-				available += cap.Allocatable - cap.Used
-			}
-		}
-		if available < resource.GPUCount {
+		available := availableGPU(*candidate, resource.GPUType)
+		if available < int64(resource.GPUCount) {
 			continue
 		}
 		if selected == nil || available < bestAvailable || (available == bestAvailable && candidate.ID < selected.ID) {
@@ -251,13 +254,8 @@ func (s *Service) CheckCapacity(id string, resource domain.Resource) error {
 	if err != nil {
 		return err
 	}
-	available := int32(0)
-	for _, capacity := range cluster.GPUCapacity {
-		if capacity.GPUType == resource.GPUType {
-			available += capacity.Allocatable - capacity.Used
-		}
-	}
-	if available < resource.GPUCount {
+	available := availableGPU(cluster, resource.GPUType)
+	if available < int64(resource.GPUCount) {
 		return fmt.Errorf("cluster %s has %d available %s GPUs; %d required", id, available, resource.GPUType, resource.GPUCount)
 	}
 	return nil
@@ -297,6 +295,18 @@ func (s *Service) CheckRuntime(id, runtime, tenantID string) error {
 }
 
 func (s *Service) Report(id, status string, capacity []Capacity) error {
+	return s.ReportWithQueues(id, status, capacity, nil)
+}
+
+func (s *Service) ReportWithQueues(id, status string, capacity []Capacity, queues []domain.VolcanoQueueCapacity) error {
+	return s.ReportSnapshot(id, status, capacity, queues, nil)
+}
+
+func (s *Service) ReportSnapshot(id, status string, capacity []Capacity, queues []domain.VolcanoQueueCapacity, telemetry *domain.ClusterTelemetry) error {
+	return s.ReportAttributedSnapshot(id, status, capacity, queues, telemetry, nil)
+}
+
+func (s *Service) ReportAttributedSnapshot(id, status string, capacity []Capacity, queues []domain.VolcanoQueueCapacity, telemetry *domain.ClusterTelemetry, assigned []domain.DeploymentGPUObservation) error {
 	if status != "healthy" && status != "unhealthy" {
 		return fmt.Errorf("healthStatus must be healthy or unhealthy")
 	}
@@ -305,7 +315,56 @@ func (s *Service) Report(id, status string, capacity []Capacity) error {
 			return fmt.Errorf("invalid GPU capacity report")
 		}
 	}
-	return s.repo.Report(id, status, capacity, s.now().UTC())
+	used := map[string]int64{}
+	for _, item := range capacity {
+		used[item.GPUType] += int64(item.Used)
+	}
+	for _, item := range assigned {
+		if item.TemplateGeneration != nil && *item.TemplateGeneration < 0 {
+			return fmt.Errorf("invalid deployment template generation")
+		}
+		if item.DeploymentID == "" || item.TenantID == "" || item.Namespace == "" || item.NodeName == "" || item.GPUType == "" || item.GPUCount <= 0 {
+			return fmt.Errorf("invalid deployment GPU observation")
+		}
+		used[item.GPUType] -= int64(item.GPUCount)
+		if used[item.GPUType] < 0 {
+			return fmt.Errorf("deployment GPU observations exceed reported used capacity")
+		}
+	}
+	seen := map[string]bool{}
+	for _, q := range queues {
+		if q.Name == "" || seen[q.Name] || q.Pending < 0 || q.Running < 0 || q.Inqueue < 0 || (q.State != "Open" && q.State != "Closed" && q.State != "Closing" && q.State != "Unknown") {
+			return fmt.Errorf("invalid Volcano queue capacity report")
+		}
+		seen[q.Name] = true
+	}
+	if status == "unhealthy" {
+		queues = nil
+		assigned = nil
+	}
+	if telemetry != nil {
+		if (telemetry.Status != "healthy" && telemetry.Status != "unhealthy") || telemetry.CollectedAt.IsZero() {
+			return fmt.Errorf("invalid cluster telemetry report")
+		}
+		if telemetry.OldestSampleAgeSeconds != nil && (math.IsNaN(*telemetry.OldestSampleAgeSeconds) || math.IsInf(*telemetry.OldestSampleAgeSeconds, 0) || *telemetry.OldestSampleAgeSeconds < 0) {
+			return fmt.Errorf("invalid cluster telemetry freshness")
+		}
+		if telemetry.Status == "healthy" && (telemetry.OldestSampleAgeSeconds == nil || len(telemetry.Samples) == 0) {
+			return fmt.Errorf("healthy telemetry requires samples and freshness")
+		}
+		for _, sample := range telemetry.Samples {
+			if sample.Name == "" || math.IsNaN(sample.Value) || math.IsInf(sample.Value, 0) || sample.EvaluatedAt <= 0 || math.IsNaN(sample.EvaluatedAt) || math.IsInf(sample.EvaluatedAt, 0) {
+				return fmt.Errorf("invalid cluster telemetry sample")
+			}
+		}
+		if telemetry.Status == "unhealthy" {
+			copy := *telemetry
+			copy.Samples = nil
+			copy.OldestSampleAgeSeconds = nil
+			telemetry = &copy
+		}
+	}
+	return s.repo.Report(id, status, capacity, queues, telemetry, assigned, s.now().UTC())
 }
 
 func (s *Service) DecryptCredentials(id string) (string, error) {
@@ -370,7 +429,7 @@ func (r *MemoryRepository) Get(id string) (Cluster, []byte, error) {
 	return cloneCluster(cluster), append([]byte(nil), r.secrets[id]...), nil
 }
 
-func (r *MemoryRepository) Report(id, status string, capacity []Capacity, at time.Time) error {
+func (r *MemoryRepository) Report(id, status string, capacity []Capacity, queues []domain.VolcanoQueueCapacity, telemetry *domain.ClusterTelemetry, assigned []domain.DeploymentGPUObservation, at time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	cluster, ok := r.clusters[id]
@@ -379,6 +438,9 @@ func (r *MemoryRepository) Report(id, status string, capacity []Capacity, at tim
 	}
 	cluster.HealthStatus, cluster.GPUCapacity, cluster.UpdatedAt = status, append([]Capacity(nil), capacity...), at
 	cluster.LastHeartbeat = &at
+	cluster.VolcanoQueues = cloneQueues(queues)
+	cluster.Telemetry = cloneTelemetry(telemetry)
+	cluster.DeploymentGPU = cloneObservations(assigned)
 	r.clusters[id] = cluster
 	return nil
 }
@@ -425,6 +487,9 @@ func (r *MemoryRepository) Delete(id string) error {
 	if _, ok := r.clusters[id]; !ok {
 		return ErrNotFound
 	}
+	if len(r.clusters[id].GPUReservations) != 0 {
+		return fmt.Errorf("cluster has GPU reservations")
+	}
 	delete(r.clusters, id)
 	delete(r.secrets, id)
 	return nil
@@ -443,7 +508,7 @@ func (r *PostgresRepository) Create(c *Cluster, encrypted []byte) error {
 }
 
 func (r *PostgresRepository) List() ([]Cluster, error) {
-	rows, err := r.db.Query(`SELECT id,name,endpoint,adapter_url,serving_url_template,labels,supported_runtimes,allowed_tenants,gpu_capacity,health_status,last_heartbeat,created_at,updated_at FROM clusters ORDER BY id`)
+	rows, err := r.db.Query(`SELECT id,name,endpoint,adapter_url,serving_url_template,labels,supported_runtimes,allowed_tenants,gpu_capacity,health_status,last_heartbeat,created_at,updated_at,volcano_queues,telemetry,deployment_gpu,gpu_reservations FROM clusters ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -451,15 +516,21 @@ func (r *PostgresRepository) List() ([]Cluster, error) {
 	result := []Cluster{}
 	for rows.Next() {
 		var c Cluster
-		var labels, runtimes, tenants, capacity []byte
+		var labels, runtimes, tenants, capacity, queues, telemetry, assigned, reservations []byte
 		var heartbeat sql.NullTime
-		if err := rows.Scan(&c.ID, &c.Name, &c.Endpoint, &c.AdapterURL, &c.ServingURLTemplate, &labels, &runtimes, &tenants, &capacity, &c.HealthStatus, &heartbeat, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.Name, &c.Endpoint, &c.AdapterURL, &c.ServingURLTemplate, &labels, &runtimes, &tenants, &capacity, &c.HealthStatus, &heartbeat, &c.CreatedAt, &c.UpdatedAt, &queues, &telemetry, &assigned, &reservations); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(labels, &c.Labels)
 		_ = json.Unmarshal(runtimes, &c.SupportedRuntimes)
 		_ = json.Unmarshal(tenants, &c.AllowedTenants)
 		_ = json.Unmarshal(capacity, &c.GPUCapacity)
+		_ = json.Unmarshal(queues, &c.VolcanoQueues)
+		_ = json.Unmarshal(telemetry, &c.Telemetry)
+		_ = json.Unmarshal(assigned, &c.DeploymentGPU)
+		if err := json.Unmarshal(reservations, &c.GPUReservations); err != nil {
+			return nil, err
+		}
 		if heartbeat.Valid {
 			c.LastHeartbeat = &heartbeat.Time
 		}
@@ -470,9 +541,9 @@ func (r *PostgresRepository) List() ([]Cluster, error) {
 
 func (r *PostgresRepository) Get(id string) (Cluster, []byte, error) {
 	var c Cluster
-	var ciphertext, labels, runtimes, tenants, capacity []byte
+	var ciphertext, labels, runtimes, tenants, capacity, queues, telemetry, assigned, reservations []byte
 	var heartbeat sql.NullTime
-	err := r.db.QueryRow(`SELECT id,name,endpoint,adapter_url,serving_url_template,kubeconfig_ciphertext,labels,supported_runtimes,allowed_tenants,gpu_capacity,health_status,last_heartbeat,created_at,updated_at FROM clusters WHERE id=$1`, id).Scan(&c.ID, &c.Name, &c.Endpoint, &c.AdapterURL, &c.ServingURLTemplate, &ciphertext, &labels, &runtimes, &tenants, &capacity, &c.HealthStatus, &heartbeat, &c.CreatedAt, &c.UpdatedAt)
+	err := r.db.QueryRow(`SELECT id,name,endpoint,adapter_url,serving_url_template,kubeconfig_ciphertext,labels,supported_runtimes,allowed_tenants,gpu_capacity,health_status,last_heartbeat,created_at,updated_at,volcano_queues,telemetry,deployment_gpu,gpu_reservations FROM clusters WHERE id=$1`, id).Scan(&c.ID, &c.Name, &c.Endpoint, &c.AdapterURL, &c.ServingURLTemplate, &ciphertext, &labels, &runtimes, &tenants, &capacity, &c.HealthStatus, &heartbeat, &c.CreatedAt, &c.UpdatedAt, &queues, &telemetry, &assigned, &reservations)
 	if err == sql.ErrNoRows {
 		return Cluster{}, nil, ErrNotFound
 	}
@@ -483,15 +554,30 @@ func (r *PostgresRepository) Get(id string) (Cluster, []byte, error) {
 	_ = json.Unmarshal(runtimes, &c.SupportedRuntimes)
 	_ = json.Unmarshal(tenants, &c.AllowedTenants)
 	_ = json.Unmarshal(capacity, &c.GPUCapacity)
+	_ = json.Unmarshal(queues, &c.VolcanoQueues)
+	_ = json.Unmarshal(telemetry, &c.Telemetry)
+	_ = json.Unmarshal(assigned, &c.DeploymentGPU)
+	if err := json.Unmarshal(reservations, &c.GPUReservations); err != nil {
+		return Cluster{}, nil, err
+	}
 	if heartbeat.Valid {
 		c.LastHeartbeat = &heartbeat.Time
 	}
 	return c, ciphertext, nil
 }
 
-func (r *PostgresRepository) Report(id, status string, capacity []Capacity, at time.Time) error {
+func (r *PostgresRepository) Report(id, status string, capacity []Capacity, queues []domain.VolcanoQueueCapacity, telemetry *domain.ClusterTelemetry, assigned []domain.DeploymentGPUObservation, at time.Time) error {
 	data, _ := json.Marshal(capacity)
-	result, err := r.db.Exec(`UPDATE clusters SET health_status=$2,gpu_capacity=$3,last_heartbeat=$4,updated_at=$4 WHERE id=$1`, id, status, string(data), at)
+	if queues == nil {
+		queues = []domain.VolcanoQueueCapacity{}
+	}
+	queueData, _ := json.Marshal(queues)
+	telemetryData, _ := json.Marshal(telemetry)
+	if assigned == nil {
+		assigned = []domain.DeploymentGPUObservation{}
+	}
+	assignedData, _ := json.Marshal(assigned)
+	result, err := r.db.Exec(`UPDATE clusters SET health_status=$2,gpu_capacity=$3,last_heartbeat=$4,updated_at=$4,volcano_queues=$5,telemetry=$6,deployment_gpu=$7 WHERE id=$1`, id, status, string(data), at, string(queueData), string(telemetryData), string(assignedData))
 	if err != nil {
 		return err
 	}
@@ -528,7 +614,7 @@ func (r *PostgresRepository) RotateCredentials(id string, ciphertext []byte) err
 }
 
 func (r *PostgresRepository) Delete(id string) error {
-	result, err := r.db.Exec(`DELETE FROM clusters WHERE id=$1 AND NOT EXISTS (SELECT 1 FROM deployments WHERE cluster_id=$1 AND status <> 'DELETED')`, id)
+	result, err := r.db.Exec(`DELETE FROM clusters WHERE id=$1 AND jsonb_array_length(gpu_reservations)=0 AND NOT EXISTS (SELECT 1 FROM deployments WHERE cluster_id=$1 AND status <> 'DELETED')`, id)
 	if err != nil {
 		return err
 	}
@@ -569,6 +655,10 @@ func cloneMap(value map[string]string) map[string]string {
 }
 
 func cloneCluster(c Cluster) Cluster {
+	c.GPUReservations = append([]GPUReservation(nil), c.GPUReservations...)
+	c.DeploymentGPU = cloneObservations(c.DeploymentGPU)
+	c.Telemetry = cloneTelemetry(c.Telemetry)
+	c.VolcanoQueues = cloneQueues(c.VolcanoQueues)
 	c.Labels = cloneMap(c.Labels)
 	c.SupportedRuntimes = append([]string(nil), c.SupportedRuntimes...)
 	c.GPUCapacity = append([]Capacity(nil), c.GPUCapacity...)
@@ -577,6 +667,43 @@ func cloneCluster(c Cluster) Cluster {
 		c.LastHeartbeat = &t
 	}
 	return c
+}
+
+func cloneObservations(input []domain.DeploymentGPUObservation) []domain.DeploymentGPUObservation {
+	out := append([]domain.DeploymentGPUObservation(nil), input...)
+	for i := range out {
+		if out[i].TemplateGeneration != nil {
+			generation := *out[i].TemplateGeneration
+			out[i].TemplateGeneration = &generation
+		}
+	}
+	return out
+}
+
+func cloneTelemetry(input *domain.ClusterTelemetry) *domain.ClusterTelemetry {
+	if input == nil {
+		return nil
+	}
+	copy := *input
+	if input.OldestSampleAgeSeconds != nil {
+		age := *input.OldestSampleAgeSeconds
+		copy.OldestSampleAgeSeconds = &age
+	}
+	copy.Samples = append([]domain.ClusterMetricSample(nil), input.Samples...)
+	for i := range copy.Samples {
+		copy.Samples[i].Labels = cloneMap(copy.Samples[i].Labels)
+	}
+	return &copy
+}
+
+func cloneQueues(queues []domain.VolcanoQueueCapacity) []domain.VolcanoQueueCapacity {
+	copy := append([]domain.VolcanoQueueCapacity(nil), queues...)
+	for i := range copy {
+		copy[i].Capability = cloneMap(copy[i].Capability)
+		copy[i].Deserved = cloneMap(copy[i].Deserved)
+		copy[i].Allocated = cloneMap(copy[i].Allocated)
+	}
+	return copy
 }
 
 func unique(values []string) []string {

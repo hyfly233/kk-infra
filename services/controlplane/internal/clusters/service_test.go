@@ -95,6 +95,64 @@ func TestClusterReportUpdatesHealthAndRejectsInvalidCapacity(t *testing.T) {
 	}
 }
 
+func TestVolcanoQueueHeartbeatPersistsAndClearsFailedSnapshot(t *testing.T) {
+	s, _ := NewService(NewMemoryRepository(), []byte("0123456789abcdef0123456789abcdef"))
+	if _, err := s.Register("gpu-west", "west", "https://k8s.example.test", "http://adapter:8082", "secret", nil, nil, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	queues := []domain.VolcanoQueueCapacity{{Name: "tenant-a", State: "Open", Capability: map[string]string{"nvidia.com/gpu": "8"}, Allocated: map[string]string{"nvidia.com/gpu": "2"}, Pending: 3}}
+	if err := s.ReportWithQueues("gpu-west", "healthy", nil, queues); err != nil {
+		t.Fatal(err)
+	}
+	queues[0].Capability["nvidia.com/gpu"] = "100"
+	c, err := s.Get("gpu-west")
+	if err != nil || len(c.VolcanoQueues) != 1 || c.VolcanoQueues[0].Capability["nvidia.com/gpu"] != "8" {
+		t.Fatalf("queue snapshot not isolated: %+v %v", c, err)
+	}
+	if err := s.ReportWithQueues("gpu-west", "healthy", nil, []domain.VolcanoQueueCapacity{{Name: "tenant-a", State: "Open", Pending: -1}}); err == nil {
+		t.Fatal("negative queue count accepted")
+	}
+	if err := s.Report("gpu-west", "unhealthy", nil); err != nil {
+		t.Fatal(err)
+	}
+	c, _ = s.Get("gpu-west")
+	if len(c.VolcanoQueues) != 0 {
+		t.Fatal("failed heartbeat retained queue snapshot")
+	}
+}
+
+func TestClusterTelemetrySnapshotIsIsolatedAndReplaced(t *testing.T) {
+	s, _ := NewService(NewMemoryRepository(), []byte("0123456789abcdef0123456789abcdef"))
+	if _, err := s.Register("gpu-west", "west", "https://k8s.example.test", "http://adapter:8082", "secret", nil, nil, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	age := 10.0
+	telemetry := &domain.ClusterTelemetry{Status: "healthy", CollectedAt: time.Now(), OldestSampleAgeSeconds: &age, Samples: []domain.ClusterMetricSample{{Name: "DCGM_FI_DEV_GPU_UTIL", Labels: map[string]string{"UUID": "GPU-a"}, Value: 0, EvaluatedAt: 1000}}}
+	if err := s.ReportSnapshot("gpu-west", "healthy", nil, nil, telemetry); err != nil {
+		t.Fatal(err)
+	}
+	telemetry.Samples[0].Labels["UUID"] = "changed"
+	c, err := s.Get("gpu-west")
+	if err != nil || c.Telemetry == nil || c.Telemetry.Samples[0].Labels["UUID"] != "GPU-a" || c.Telemetry.Samples[0].Value != 0 {
+		t.Fatalf("telemetry snapshot not isolated: %+v %v", c, err)
+	}
+	telemetry.Status = "unhealthy"
+	if err := s.ReportSnapshot("gpu-west", "healthy", nil, nil, telemetry); err != nil {
+		t.Fatal(err)
+	}
+	c, _ = s.Get("gpu-west")
+	if c.HealthStatus != "healthy" || c.Telemetry.Status != "unhealthy" || len(c.Telemetry.Samples) != 0 {
+		t.Fatalf("failed telemetry retained samples or failed cluster: %+v", c)
+	}
+	if err := s.Report("gpu-west", "healthy", nil); err != nil {
+		t.Fatal(err)
+	}
+	c, _ = s.Get("gpu-west")
+	if c.Telemetry != nil {
+		t.Fatal("disabled telemetry retained old snapshot")
+	}
+}
+
 func TestClusterChecksRejectStaleCapacityAndUnsupportedPlacement(t *testing.T) {
 	service, _ := NewService(NewMemoryRepository(), []byte("0123456789abcdef0123456789abcdef"))
 	now := time.Now().UTC()

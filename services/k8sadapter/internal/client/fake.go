@@ -129,6 +129,9 @@ func (f *FakeKubeClient) NodeGPUCapacity(ctx context.Context, gpuType string) (t
 
 // CreateDeployment 幂等创建部署，异步推进生命周期
 func (f *FakeKubeClient) CreateDeployment(ctx context.Context, spec *DeploymentSpec) (*DeploymentResult, error) {
+	if err := validateServingCapability(spec); err != nil {
+		return nil, err
+	}
 	f.mu.Lock()
 	k := key(spec.Name, spec.Namespace)
 	if _, exists := f.deploys[k]; exists {
@@ -146,6 +149,9 @@ func (f *FakeKubeClient) CreateDeployment(ctx context.Context, spec *DeploymentS
 
 // UpdateDeployment 替换 Fake 部署规格并重新推进就绪状态，模拟滚动更新。
 func (f *FakeKubeClient) UpdateDeployment(ctx context.Context, spec *DeploymentSpec) (*DeploymentResult, error) {
+	if err := validateServingCapability(spec); err != nil {
+		return nil, err
+	}
 	f.mu.Lock()
 	d, ok := f.deploys[key(spec.Name, spec.Namespace)]
 	if !ok {

@@ -99,6 +99,9 @@ func TestDeploymentPassesVerifiedArtifactToAdapter(t *testing.T) {
 	if kube.lastSpec.Runtime != domain.RuntimeVLLM || kube.lastSpec.ServingMode != domain.ServingModeUnified {
 		t.Fatalf("runtime serving profile not forwarded: %+v", kube.lastSpec)
 	}
+	if kube.lastSpec.Labels["carrot.ai/template-generation"] != "0" {
+		t.Fatalf("initial template generation not forwarded: %+v", kube.lastSpec.Labels)
+	}
 }
 
 func (m *mockKubeClient) GetDeployment(ctx context.Context, name, namespace string) (*clients.K8sDeploymentResult, error) {
@@ -348,6 +351,9 @@ func TestFailedRolloutRestoresStableRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if kube.lastSpec.Labels["carrot.ai/template-generation"] != "1" {
+		t.Fatalf("upgrade generation not forwarded: %+v", kube.lastSpec.Labels)
+	}
 	if result.Status != domain.DeploymentStatusFailed || result.ModelVersionID != "v1" {
 		t.Fatalf("stable revision was not restored: %+v", result)
 	}
@@ -447,7 +453,7 @@ func TestClusterRegistrationAndAgentHeartbeat(t *testing.T) {
 	if _, err := srv.identity.AuthenticateClusterAgent(agent, "gpu-east"); err == nil {
 		t.Fatal("agent token authorized for another cluster")
 	}
-	heartbeat := httptest.NewRequest(http.MethodPost, "/api/v1/clusters/gpu-west/heartbeat", bytes.NewBufferString(`{"healthStatus":"healthy","gpuCapacity":[{"gpuType":"H100","total":8,"allocatable":7,"used":1}]}`))
+	heartbeat := httptest.NewRequest(http.MethodPost, "/api/v1/clusters/gpu-west/heartbeat", bytes.NewBufferString(`{"healthStatus":"healthy","gpuCapacity":[{"gpuType":"H100","total":8,"allocatable":7,"used":1}],"deploymentGpu":[{"deploymentId":"deploy-a","tenantId":"tenant-a","namespace":"tenant-a","nodeName":"node-a","gpuType":"H100","gpuCount":1}],"volcanoQueues":[{"name":"tenant-a","state":"Open","capability":{"nvidia.com/gpu":"8"},"allocated":{"nvidia.com/gpu":"1"},"pending":2}]}`))
 	heartbeat.Header.Set("Authorization", "Bearer "+agent)
 	reported := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(reported, heartbeat)
@@ -457,6 +463,26 @@ func TestClusterRegistrationAndAgentHeartbeat(t *testing.T) {
 	clusters, err := srv.clusters.List()
 	if err != nil || len(clusters) != 1 || clusters[0].HealthStatus != "healthy" || clusters[0].GPUCapacity[0].Used != 1 {
 		t.Fatalf("heartbeat not stored: %+v err=%v", clusters, err)
+	}
+	if len(clusters[0].VolcanoQueues) != 1 || clusters[0].VolcanoQueues[0].Pending != 2 || clusters[0].VolcanoQueues[0].Allocated["nvidia.com/gpu"] != "1" {
+		t.Fatalf("queue heartbeat not stored: %+v", clusters[0])
+	}
+	if len(clusters[0].DeploymentGPU) != 1 || clusters[0].DeploymentGPU[0].DeploymentID != "deploy-a" {
+		t.Fatalf("attribution not stored: %+v", clusters[0])
+	}
+	telemetryReq := httptest.NewRequest(http.MethodPost, "/api/v1/clusters/gpu-west/heartbeat", bytes.NewBufferString(`{"healthStatus":"healthy","gpuCapacity":[],"telemetry":{"status":"unhealthy","reason":"Prometheus unavailable","collectedAt":"2026-09-26T00:00:00Z"}}`))
+	telemetryReq.Header.Set("Authorization", "Bearer "+agent)
+	telemetryRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(telemetryRes, telemetryReq)
+	if telemetryRes.Code != http.StatusOK {
+		t.Fatalf("telemetry heartbeat rejected: %s", telemetryRes.Body.String())
+	}
+	c, err := srv.clusters.Get("gpu-west")
+	if err != nil || c.Telemetry == nil || c.Telemetry.Status != "unhealthy" || c.HealthStatus != "healthy" {
+		t.Fatalf("telemetry heartbeat not stored: %+v %v", c, err)
+	}
+	if len(c.DeploymentGPU) != 0 {
+		t.Fatal("omitted attribution retained old data")
 	}
 }
 
@@ -763,6 +789,12 @@ func TestManualClusterRebuildRequiresAdminAndSubmitsToTarget(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if err := clusterService.Report("gpu-west", "healthy", []clusters.Capacity{{GPUType: "A100", Total: 8, Allocatable: 8}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := clusterService.ReserveCapacity("gpu-west", clusters.GPUReservation{DeploymentID: "deployment-a", TenantID: "tenant-a", Namespace: "tenant-tenant-a", ModelVersionID: "v1", GPUType: "A100", GPUCount: 1}, domain.RuntimeVLLM); err != nil {
+		t.Fatal(err)
+	}
 	if err := clusterService.Report("gpu-west", "unhealthy", nil); err != nil {
 		t.Fatal(err)
 	}
@@ -798,6 +830,11 @@ func TestManualClusterRebuildRequiresAdminAndSubmitsToTarget(t *testing.T) {
 	}
 	if got := call(admin, valid); got.Code == http.StatusOK {
 		t.Fatal("duplicate rebuild accepted")
+	}
+	west, _ := clusterService.Get("gpu-west")
+	east, _ := clusterService.Get("gpu-east")
+	if len(west.GPUReservations) != 1 || len(east.GPUReservations) != 1 || east.GPUReservations[0].TemplateGeneration != 1 || east.GPUReservations[0].ModelVersionID != "v1" {
+		t.Fatalf("rebuild reservations: old=%+v target=%+v", west.GPUReservations, east.GPUReservations)
 	}
 	select {
 	case spec := <-called:

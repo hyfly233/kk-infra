@@ -38,6 +38,7 @@ type Server struct {
 		ProvisionTenant(context.Context, string) error
 	}
 	clusters *clusters.Service
+	notebook *clients.NotebookHubClient
 }
 
 // NewServer 创建服务
@@ -50,8 +51,9 @@ func (s *Server) SetObservabilityClient(c *clients.ObservabilityClient) {
 	s.observability = c
 }
 
-func (s *Server) SetIdentityService(service *identity.Service) { s.identity = service }
-func (s *Server) SetClusterService(service *clusters.Service)  { s.clusters = service }
+func (s *Server) SetIdentityService(service *identity.Service)     { s.identity = service }
+func (s *Server) SetClusterService(service *clusters.Service)      { s.clusters = service }
+func (s *Server) SetNotebookHub(client *clients.NotebookHubClient) { s.notebook = client }
 func (s *Server) SetTenantProvisioner(p interface {
 	ProvisionTenant(context.Context, string) error
 }) {
@@ -66,8 +68,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/refresh", s.handleRefresh)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.handleLogout)
 	mux.HandleFunc("POST /api/v1/auth/introspect", s.handleIntrospect)
+	mux.HandleFunc("POST /internal/notebooks/introspect", s.handleNotebookIntrospect)
+	mux.HandleFunc("POST /api/v1/notebooks/hub-token", s.handleNotebookHubToken)
+	mux.HandleFunc("GET /api/v1/notebooks/workspace", s.handleNotebookWorkspace)
+	mux.HandleFunc("POST /api/v1/notebooks/workspace", s.handleNotebookWorkspace)
+	mux.HandleFunc("DELETE /api/v1/notebooks/workspace", s.handleNotebookWorkspace)
 	mux.HandleFunc("POST /api/v1/clusters", s.handleRegisterCluster)
 	mux.HandleFunc("GET /api/v1/clusters", s.handleListClusters)
+	mux.HandleFunc("GET /api/v1/clusters/alerts", s.handleClusterAlerts)
+	mux.HandleFunc("POST /api/v1/clusters/monitor-token", s.handleClusterMonitorToken)
+	mux.HandleFunc("GET /internal/clusters/metrics", s.handleClusterAlertMetrics)
 	mux.HandleFunc("POST /api/v1/clusters/{id}/heartbeat", s.handleClusterHeartbeat)
 	mux.HandleFunc("POST /api/v1/clusters/{id}/agent-token", s.handleClusterAgentToken)
 	mux.HandleFunc("PUT /api/v1/clusters/{id}/serving-route", s.handleUpdateClusterServingRoute)
@@ -86,6 +96,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/deployments/{id}/scale", s.handleScaleDeployment)
 	mux.HandleFunc("POST /api/v1/deployments/{id}/restart", s.handleRestartDeployment)
 	mux.HandleFunc("POST /api/v1/deployments/{id}/rebuild", s.handleRebuildDeployment)
+	mux.HandleFunc("GET /api/v1/deployments/{id}/orphan-reservations", s.handleOrphanReservations)
+	mux.HandleFunc("POST /api/v1/deployments/{id}/orphan-cleanup", s.handleOrphanCleanup)
 	mux.HandleFunc("POST /api/v1/deployments/{id}/upgrade", s.handleUpgradeDeployment)
 	mux.HandleFunc("POST /api/v1/deployments/{id}/rollback", s.handleRollbackDeployment)
 	mux.HandleFunc("GET /api/v1/deployments/{id}/revisions", s.handleDeploymentRevisions)
@@ -346,14 +358,17 @@ func (s *Server) handleClusterHeartbeat(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	var req struct {
-		HealthStatus string              `json:"healthStatus"`
-		GPUCapacity  []clusters.Capacity `json:"gpuCapacity"`
+		HealthStatus  string                            `json:"healthStatus"`
+		GPUCapacity   []clusters.Capacity               `json:"gpuCapacity"`
+		VolcanoQueues []domain.VolcanoQueueCapacity     `json:"volcanoQueues"`
+		Telemetry     *domain.ClusterTelemetry          `json:"telemetry"`
+		DeploymentGPU []domain.DeploymentGPUObservation `json:"deploymentGpu"`
 	}
 	if json.NewDecoder(r.Body).Decode(&req) != nil {
 		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, "请求体解析失败"))
 		return
 	}
-	if err := s.clusters.Report(r.PathValue("id"), req.HealthStatus, req.GPUCapacity); err != nil {
+	if err := s.clusters.ReportAttributedSnapshot(r.PathValue("id"), req.HealthStatus, req.GPUCapacity, req.VolcanoQueues, req.Telemetry, req.DeploymentGPU); err != nil {
 		code := errcode.ErrBadRequest
 		if errors.Is(err, clusters.ErrNotFound) {
 			code = errcode.ErrNotFound
@@ -440,6 +455,14 @@ func canAccessTenant(ctx context.Context, tenantID string) bool {
 func (s *Server) authRequired(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/v1/auth/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if r.Method == http.MethodGet && r.URL.Path == "/internal/clusters/metrics" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Path == "/internal/notebooks/introspect" {
 			next.ServeHTTP(w, r)
 			return
 		}

@@ -3,9 +3,10 @@ import { computed, onMounted, ref } from 'vue'
 import { billingCSVURL, fetchBilling, setRateCard } from '../api'
 import type { DailyUsage } from '../types'
 import { useAuth } from '../composables/useAuth'
+import { authenticatedFetch } from '../composables/useAuth'
 
-const { isAdmin } = useAuth()
-const tenantId = ref('default')
+const { isAdmin, tenantId: currentTenant } = useAuth()
+const tenantId = ref(currentTenant.value)
 const today = new Date().toISOString().slice(0, 10)
 const start = new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10)
 const from = ref(start)
@@ -42,11 +43,24 @@ async function saveRate() {
 }
 
 onMounted(load)
+
+async function exportCSV() {
+  try {
+    const response = await authenticatedFetch(billingCSVURL(tenantId.value, from.value, to.value))
+    if (!response.ok) throw new Error('账单导出失败')
+    const url = URL.createObjectURL(await response.blob())
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'billing.csv'
+    link.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  } catch (e) { error.value = (e as Error).message }
+}
 </script>
 
 <template>
   <div class="page">
-    <div class="page-header"><h2>用量与账单</h2><a class="button" :href="billingCSVURL(tenantId, from, to)">导出 CSV</a></div>
+    <div class="page-header"><h2>用量与账单</h2><button class="button" @click="exportCSV">导出 CSV</button></div>
     <div class="panel filters">
       <label>租户<input v-model="tenantId" /></label>
       <label>开始日期<input v-model="from" type="date" /></label>

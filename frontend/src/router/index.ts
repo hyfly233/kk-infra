@@ -69,6 +69,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: 'GPU 资源' },
       },
       {
+        path: 'notebooks',
+        name: 'notebooks',
+        component: () => import('../views/NotebookView.vue'),
+        meta: { title: 'Notebook 工作空间' },
+      },
+      {
         path: 'quotas',
         name: 'quotas',
         component: () => import('../views/QuotasView.vue'),

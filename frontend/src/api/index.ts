@@ -1,4 +1,5 @@
 // 后端 API 封装：统一错误处理与响应解包
+import { authenticatedFetch } from '../composables/useAuth'
 import type {
   ApiResponse,
   APIKey,
@@ -28,7 +29,7 @@ export class ApiError extends Error {
 
 // request 通用请求封装
 async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
-  const resp = await fetch(url, {
+  const resp = await authenticatedFetch(url, {
     headers: { 'Content-Type': 'application/json' },
     ...options,
   })
@@ -45,6 +46,15 @@ async function request<T>(url: string, options: RequestInit = {}): Promise<T> {
 }
 
 // ---- 控制面 API（controlplane :8080，代理 /api） ----
+export interface NotebookWorkspace {
+  tenantId: string
+  ownerId: string
+  status: 'ABSENT' | 'STARTING' | 'RUNNING' | 'STOPPING' | 'STOPPED'
+  url?: string
+}
+export function fetchNotebook(): Promise<NotebookWorkspace> { return request('/api/v1/notebooks/workspace') }
+export function startNotebook(): Promise<NotebookWorkspace> { return request('/api/v1/notebooks/workspace', { method: 'POST' }) }
+export function deleteNotebook(): Promise<NotebookWorkspace> { return request('/api/v1/notebooks/workspace', { method: 'DELETE' }) }
 
 // GPU 资源
 export function fetchGPUs(gpuType?: string): Promise<GPUResourcesView> {

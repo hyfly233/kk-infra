@@ -2,8 +2,10 @@
 // 管理后台布局：侧边栏 + 顶栏，按角色显示菜单
 import { useAuth } from '../composables/useAuth'
 import { useRoute, useRouter } from 'vue-router'
+import { computed } from 'vue'
 
-const { isAdmin, username, logout } = useAuth()
+const { isAdmin, role, username, logout } = useAuth()
+const roleLabels = { platform_admin: '平台管理员', tenant_admin: '租户管理员', developer: '开发者', viewer: '只读者' }
 const route = useRoute()
 const router = useRouter()
 
@@ -13,6 +15,7 @@ const allMenus = [
   { name: 'models', label: '模型管理', path: '/models' },
   { name: 'deployments', label: '模型服务', path: '/deployments' },
   { name: 'gpus', label: 'GPU 资源', path: '/gpus' },
+  { name: 'notebooks', label: 'Notebook 工作空间', path: '/notebooks' },
   { name: 'quotas', label: '租户与配额', path: '/quotas', adminOnly: true },
   { name: 'audit', label: '告警与审计', path: '/audit', adminOnly: true },
   { name: 'billing', label: '用量与账单', path: '/billing' },
@@ -20,16 +23,17 @@ const allMenus = [
   { name: 'settings', label: '系统设置', path: '/settings', adminOnly: true },
 ]
 
-const menus = allMenus.filter((m) => !m.adminOnly || isAdmin.value)
+const menus = computed(() => allMenus.filter((m) => !m.adminOnly || isAdmin.value))
 
 function isActive(path: string) {
   if (path === '/') return route.path === '/'
   return route.path.startsWith(path)
 }
 
-function doLogout() {
-  logout()
-  router.push('/login')
+async function doLogout() {
+  try { await logout() }
+  catch (e) { window.alert(e instanceof Error ? e.message : '服务端退出未确认') }
+  finally { await router.push('/login') }
 }
 </script>
 
@@ -58,7 +62,7 @@ function doLogout() {
         <div class="topbar-title">{{ route.meta.title ?? '' }}</div>
         <div class="flex">
           <span class="role-tag" :class="isAdmin ? 'admin' : 'user'">
-            {{ isAdmin ? '管理员' : '普通用户' }}
+            {{ role ? roleLabels[role] : '' }}
           </span>
           <span class="username">{{ username }}</span>
           <button class="ghost" @click="doLogout">退出</button>

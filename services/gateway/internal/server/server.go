@@ -22,11 +22,12 @@ import (
 
 // Server 网关服务
 type Server struct {
-	keys       *auth.Manager
-	routes     *router.Table
-	proxy      *proxy.Proxy
-	logger     *slog.Logger
-	authSecret string
+	keys          *auth.Manager
+	routes        *router.Table
+	proxy         *proxy.Proxy
+	logger        *slog.Logger
+	authSecret    string
+	tenantChecker func(context.Context, string) (bool, error)
 }
 
 // NewServer 创建网关服务
@@ -79,6 +80,21 @@ func (s *Server) authRequired(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		// 注入租户 + API Key 到 context（R2-4 模型授权用）
+		if s.authSecret != "" {
+			if s.tenantChecker == nil {
+				s.writeKeyErr(w, r, http.StatusServiceUnavailable, "租户状态校验未配置")
+				return
+			}
+			active, err := s.tenantChecker(r.Context(), tenant)
+			if err != nil {
+				s.writeKeyErr(w, r, http.StatusServiceUnavailable, "租户状态暂时无法确认")
+				return
+			}
+			if !active {
+				s.writeKeyErr(w, r, http.StatusForbidden, "租户不存在或已停用")
+				return
+			}
+		}
 		ctx := withTenant(r.Context(), tenant)
 		ctx = withAPIKey(ctx, key)
 		next(w, r.WithContext(ctx))

@@ -28,6 +28,7 @@ func main() {
 	ratePerMinute := flag.Int("rate-per-minute", 0, "每租户每分钟限流（0=不限）")
 	storage := flag.String("storage", "memory", "存储后端: memory | postgres")
 	authSecret := flag.String("auth-secret", os.Getenv("CARROT_AUTH_SECRET"), "管理接口 JWT 签名密钥，空值仅供不安全开发模式")
+	controlplaneURL := flag.String("controlplane-url", "http://127.0.0.1:8080", "在线租户状态查询的 controlplane 地址")
 	observabilityURL := flag.String("observability-url", "", "observability 服务地址（指标上报，空则跳过）")
 	flag.Parse()
 
@@ -86,6 +87,9 @@ func main() {
 	}
 	srv := server.NewServer(keys, routes, p, logger)
 	srv.SetAuthSecret(*authSecret)
+	if *authSecret != "" {
+		srv.ConfigureTenantCheck(*controlplaneURL, *authSecret)
+	}
 	if *authSecret == "" {
 		logger.Warn("gateway 管理接口鉴权未启用，仅限可信本地开发环境")
 	}

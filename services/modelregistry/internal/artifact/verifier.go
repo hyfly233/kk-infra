@@ -60,7 +60,7 @@ func (v *S3Verifier) Verify(ctx context.Context, rawURI, expectedDigest string) 
 
 func ParseS3URI(rawURI string) (string, string, error) {
 	u, err := url.Parse(rawURI)
-	if err != nil || u.Scheme != "s3" || u.Host == "" || strings.TrimPrefix(u.Path, "/") == "" {
+	if err != nil || u.Scheme != "s3" || u.Host == "" || u.Host != u.Hostname() || u.User != nil || u.RawQuery != "" || u.Fragment != "" || strings.TrimPrefix(u.Path, "/") == "" {
 		return "", "", fmt.Errorf("artifactUri 必须为 s3://bucket/object")
 	}
 	return u.Host, strings.TrimPrefix(u.Path, "/"), nil

@@ -16,6 +16,7 @@ import (
 )
 
 type Server struct {
+	userVerifier             *platformauth.UserVerifier
 	service                  *service.Service
 	logger                   *slog.Logger
 	authSecret, authAudience string
@@ -25,6 +26,7 @@ func New(s *service.Service, l *slog.Logger) *Server { return &Server{service: s
 func (s *Server) SetAuth(secret, audience string) {
 	s.authSecret, s.authAudience = secret, audience
 }
+func (s *Server) SetUserVerifier(v *platformauth.UserVerifier) { s.userVerifier = v }
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
@@ -141,12 +143,16 @@ func (s *Server) authRequired(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		if s.authAudience != "controlplane" {
+			apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "用户会话仅支持 controlplane audience"))
+			return
+		}
 		authz := r.Header.Get("Authorization")
 		if !strings.HasPrefix(authz, "Bearer ") {
 			apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "缺少 Bearer Token"))
 			return
 		}
-		claims, err := platformauth.ParseAccessToken(s.authSecret, strings.TrimPrefix(authz, "Bearer "), s.authAudience)
+		claims, err := s.userVerifier.Verify(r.Context(), strings.TrimPrefix(authz, "Bearer "))
 		if err != nil || (claims.Role != platformauth.RolePlatformAdmin && claims.TenantID == "") {
 			apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "access token 无效"))
 			return

@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	platformauth "kk-infra/lib/auth"
 	"kk-infra/lib/store"
 	"kk-infra/services/pipeline/internal/data"
 	"kk-infra/services/pipeline/internal/server"
@@ -24,6 +25,7 @@ func main() {
 	token := flag.String("pipeline-token", "", "modelregistry 发布令牌")
 	authSecret := flag.String("auth-secret", os.Getenv("CARROT_AUTH_SECRET"), "JWT 签名密钥（为空时使用开发模式）")
 	authAudience := flag.String("auth-audience", "controlplane", "JWT audience")
+	controlplaneURL := flag.String("controlplane-url", "http://127.0.0.1:8080", "在线成员鉴权控制面地址")
 	maxTTFT := flag.Float64("benchmark-max-ttft-ms", 5000, "发布门禁允许的最大 TTFT（毫秒，0 表示禁用）")
 	minThroughput := flag.Float64("benchmark-min-tokens-per-sec", 0.1, "发布门禁要求的最小输出吞吐（0 表示禁用）")
 	maxErrorRate := flag.Float64("benchmark-max-error-rate", 0, "发布门禁允许的最大错误率百分比")
@@ -54,6 +56,7 @@ func main() {
 	handler := server.New(svc, logger)
 	if *authSecret != "" {
 		handler.SetAuth(*authSecret, *authAudience)
+		handler.SetUserVerifier(platformauth.NewUserVerifier(*controlplaneURL, *authSecret, "pipeline"))
 	}
 	httpSrv := &http.Server{Addr: *addr, Handler: handler.Handler(), ReadHeaderTimeout: 5 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

@@ -67,6 +67,7 @@ func TestReleaseAuthEnforcesTenantAndApprovalRole(t *testing.T) {
 	const secret = "release-auth-test-secret"
 	srv := New(service.New(store, "", "", ""), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	srv.SetAuth(secret, "controlplane")
+	srv.SetUserVerifier(userVerifierFixture(t, secret, "pipeline"))
 	handler := srv.Handler()
 	token, err := platformauth.IssueAccessToken(secret, "viewer-a", "tenant-a", platformauth.RoleViewer, "controlplane", now, time.Hour)
 	if err != nil {

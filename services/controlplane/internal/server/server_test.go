@@ -15,6 +15,7 @@ import (
 	"kk-infra/lib/domain"
 	"kk-infra/services/controlplane/internal/biz"
 	"kk-infra/services/controlplane/internal/clients"
+	"kk-infra/services/controlplane/internal/clusters"
 	"kk-infra/services/controlplane/internal/data"
 	"kk-infra/services/controlplane/internal/identity"
 )
@@ -392,4 +393,444 @@ func TestJWTIntrospectionReturnsTenantWorkspaceIdentity(t *testing.T) {
 	if body["active"] != false {
 		t.Fatalf("invalid token must be inactive: %+v", body)
 	}
+}
+
+func TestClusterRegistrationAndAgentHeartbeat(t *testing.T) {
+	const secret = "cluster-api-test-secret"
+	srv := NewServer(nil, nil, nil, nil, nil, slog.Default())
+	srv.SetIdentityService(identity.NewService(secret))
+	srv.SetClusterService(mustClusterService(t))
+	admin, err := platformauth.IssueAccessToken(secret, "admin", "", platformauth.RolePlatformAdmin, "controlplane", time.Now(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"id":"gpu-west","name":"west","endpoint":"https://k8s.example.test","adapterUrl":"http://adapter-west:8082","kubeconfig":"private-kubeconfig","labels":{"region":"west"},"supportedRuntimes":["vLLM"]}`
+	register := httptest.NewRequest(http.MethodPost, "/api/v1/clusters", bytes.NewBufferString(body))
+	register.Header.Set("Authorization", "Bearer "+admin)
+	registered := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(registered, register)
+	if registered.Code != http.StatusOK || bytes.Contains(registered.Body.Bytes(), []byte("private-kubeconfig")) {
+		t.Fatalf("cluster registration failed or leaked credentials: status=%d body=%s", registered.Code, registered.Body.String())
+	}
+	updateRoute := httptest.NewRequest(http.MethodPut, "/api/v1/clusters/gpu-west/serving-route", bytes.NewBufferString(`{"servingUrlTemplate":"https://{service}.{namespace}.west.example.test"}`))
+	updateRoute.Header.Set("Authorization", "Bearer "+admin)
+	updatedRoute := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(updatedRoute, updateRoute)
+	if updatedRoute.Code != http.StatusOK {
+		t.Fatalf("serving route update failed: %d %s", updatedRoute.Code, updatedRoute.Body.String())
+	}
+	cluster, err := srv.clusters.Get("gpu-west")
+	if err != nil || cluster.ServingURLTemplate != "https://{service}.{namespace}.west.example.test" {
+		t.Fatalf("template not persisted: %+v %v", cluster, err)
+	}
+
+	tokenReq := httptest.NewRequest(http.MethodPost, "/api/v1/clusters/gpu-west/agent-token", nil)
+	tokenReq.Header.Set("Authorization", "Bearer "+admin)
+	tokenRes := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(tokenRes, tokenReq)
+	var issued struct {
+		Data struct {
+			Token     string    `json:"token"`
+			ExpiresAt time.Time `json:"expiresAt"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(tokenRes.Body).Decode(&issued); err != nil {
+		t.Fatal(err)
+	}
+	if tokenRes.Code != http.StatusOK || issued.Data.Token == "" || tokenRes.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("token issuance failed: %d", tokenRes.Code)
+	}
+	agent := issued.Data.Token
+	if _, err := srv.identity.Authenticate(agent); err == nil {
+		t.Fatal("agent token authorized for controlplane management")
+	}
+	if _, err := srv.identity.AuthenticateClusterAgent(agent, "gpu-east"); err == nil {
+		t.Fatal("agent token authorized for another cluster")
+	}
+	heartbeat := httptest.NewRequest(http.MethodPost, "/api/v1/clusters/gpu-west/heartbeat", bytes.NewBufferString(`{"healthStatus":"healthy","gpuCapacity":[{"gpuType":"H100","total":8,"allocatable":7,"used":1}]}`))
+	heartbeat.Header.Set("Authorization", "Bearer "+agent)
+	reported := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(reported, heartbeat)
+	if reported.Code != http.StatusOK {
+		t.Fatalf("heartbeat rejected: status=%d body=%s", reported.Code, reported.Body.String())
+	}
+	clusters, err := srv.clusters.List()
+	if err != nil || len(clusters) != 1 || clusters[0].HealthStatus != "healthy" || clusters[0].GPUCapacity[0].Used != 1 {
+		t.Fatalf("heartbeat not stored: %+v err=%v", clusters, err)
+	}
+}
+
+func TestClusterManagementRequiresAdminAndProtectsCredentials(t *testing.T) {
+	const secret = "cluster-management-test-secret"
+	repo := data.NewMemoryDeploymentRepository()
+	srv := NewServer(biz.NewDeploymentUseCase(repo, nil, nil), nil, nil, nil, repo, slog.Default())
+	srv.SetIdentityService(identity.NewService(secret))
+	srv.SetClusterService(mustClusterService(t))
+	if _, err := srv.clusters.Register("gpu-west", "west", "https://k8s.example.test", "http://adapter-west:8082", "old-secret", nil, []string{"vLLM"}, nil, ""); err != nil {
+		t.Fatal(err)
+	}
+	admin, _ := platformauth.IssueAccessToken(secret, "admin", "", platformauth.RolePlatformAdmin, "controlplane", time.Now(), time.Hour)
+	viewer, _ := platformauth.IssueAccessToken(secret, "viewer", "tenant-a", platformauth.RoleViewer, "controlplane", time.Now(), time.Hour)
+	call := func(method, path, body, token string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, bytes.NewBufferString(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		res := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(res, req)
+		return res
+	}
+	policyPath := "/api/v1/clusters/gpu-west/placement-policy"
+	policy := `{"labels":{"region":"west"},"supportedRuntimes":["Triton"],"allowedTenants":["tenant-a"]}`
+	if got := call(http.MethodPut, policyPath, policy, viewer); got.Code != http.StatusUnauthorized {
+		t.Fatalf("viewer updated policy: %d", got.Code)
+	}
+	if got := call(http.MethodPut, policyPath, policy, admin); got.Code != http.StatusOK {
+		t.Fatalf("policy update: %d %s", got.Code, got.Body.String())
+	}
+	cluster, err := srv.clusters.Get("gpu-west")
+	if err != nil || cluster.Labels["region"] != "west" || cluster.SupportedRuntimes[0] != "Triton" {
+		t.Fatalf("policy not updated: %+v %v", cluster, err)
+	}
+	credentialPath := "/api/v1/clusters/gpu-west/credentials"
+	if got := call(http.MethodPut, credentialPath, `{"kubeconfig":"new-secret"}`, viewer); got.Code != http.StatusUnauthorized {
+		t.Fatalf("viewer rotated credentials: %d", got.Code)
+	}
+	if got := call(http.MethodPut, credentialPath, `{"kubeconfig":"new-secret"}`, admin); got.Code != http.StatusOK || bytes.Contains(got.Body.Bytes(), []byte("new-secret")) || got.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("credential rotation: %d %s", got.Code, got.Body.String())
+	}
+	if got, err := srv.clusters.DecryptCredentials("gpu-west"); err != nil || got != "new-secret" {
+		t.Fatalf("credentials not updated: %q %v", got, err)
+	}
+	if got := call(http.MethodDelete, "/api/v1/clusters/gpu-west", "", viewer); got.Code != http.StatusUnauthorized {
+		t.Fatalf("viewer deleted cluster: %d", got.Code)
+	}
+	d := &domain.ModelDeployment{ID: "active-a", Name: "active-a", ClusterID: "gpu-west", Status: domain.DeploymentStatusFailed}
+	if err := repo.Create(d); err != nil {
+		t.Fatal(err)
+	}
+	if got := call(http.MethodDelete, "/api/v1/clusters/gpu-west", "", admin); got.Code != http.StatusConflict {
+		t.Fatalf("cluster with deployment deleted: %d %s", got.Code, got.Body.String())
+	}
+	d.Status = domain.DeploymentStatusDeleted
+	if err := repo.Update(d); err != nil {
+		t.Fatal(err)
+	}
+	if got := call(http.MethodDelete, "/api/v1/clusters/gpu-west", "", admin); got.Code != http.StatusOK {
+		t.Fatalf("cluster deletion: %d %s", got.Code, got.Body.String())
+	}
+}
+
+func TestClusterHeartbeatRejectsWrongAgentAudience(t *testing.T) {
+	const secret = "cluster-api-test-secret"
+	srv := NewServer(nil, nil, nil, nil, nil, slog.Default())
+	srv.SetIdentityService(identity.NewService(secret))
+	srv.SetClusterService(mustClusterService(t))
+	wrong, _ := platformauth.IssueAccessToken(secret, "gpu-west", "", platformauth.RolePlatformAdmin, "controlplane", time.Now(), time.Hour)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/clusters/gpu-west/heartbeat", bytes.NewBufferString(`{"healthStatus":"healthy"}`))
+	req.Header.Set("Authorization", "Bearer "+wrong)
+	res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong audience token accepted: status=%d", res.Code)
+	}
+}
+
+func TestClusterAgentTokenRequiresAdminAndExistingCluster(t *testing.T) {
+	const secret = "cluster-token-test-secret"
+	srv := NewServer(nil, nil, nil, nil, nil, slog.Default())
+	srv.SetIdentityService(identity.NewService(secret))
+	srv.SetClusterService(mustClusterService(t))
+	for _, tc := range []struct {
+		role platformauth.Role
+		want int
+	}{
+		{platformauth.RoleTenantAdmin, http.StatusUnauthorized},
+		{platformauth.RoleDeveloper, http.StatusUnauthorized},
+		{platformauth.RoleViewer, http.StatusUnauthorized},
+		{platformauth.RolePlatformAdmin, http.StatusNotFound},
+	} {
+		t.Run(string(tc.role), func(t *testing.T) {
+			token, err := platformauth.IssueAccessToken(secret, "user", "tenant-a", tc.role, "controlplane", time.Now(), time.Hour)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/clusters/missing/agent-token", nil)
+			req.Header.Set("Authorization", "Bearer "+token)
+			res := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(res, req)
+			if res.Code != tc.want {
+				t.Fatalf("status = %d, want %d: %s", res.Code, tc.want, res.Body.String())
+			}
+			if tc.role != platformauth.RolePlatformAdmin {
+				update := httptest.NewRequest(http.MethodPut, "/api/v1/clusters/missing/serving-route", bytes.NewBufferString(`{"servingUrlTemplate":"https://{service}.{namespace}.example.test"}`))
+				update.Header.Set("Authorization", "Bearer "+token)
+				got := httptest.NewRecorder()
+				srv.Handler().ServeHTTP(got, update)
+				if got.Code != http.StatusUnauthorized {
+					t.Fatalf("unauthorized route update status=%d", got.Code)
+				}
+			}
+		})
+	}
+}
+
+func TestTenantAdminCannotGrantOrModifyPlatformAdmin(t *testing.T) {
+	const secret = "member-authorization-test"
+	srv := NewServer(nil, nil, nil, nil, nil, slog.Default())
+	svc := identity.NewService(secret)
+	srv.SetIdentityService(svc)
+	for _, user := range []string{"platform", "tenant-admin", "developer"} {
+		if _, err := svc.CreateUser(user, user+"@example.test", "correct horse battery staple"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := svc.SetMember("platform", "tenant-a", platformauth.RolePlatformAdmin); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.SetMember("tenant-admin", "tenant-a", platformauth.RoleTenantAdmin); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		actor, target   string
+		actorRole, role platformauth.Role
+		want            int
+	}{
+		{"tenant-admin", "tenant-admin", platformauth.RoleTenantAdmin, platformauth.RolePlatformAdmin, http.StatusUnauthorized},
+		{"tenant-admin", "platform", platformauth.RoleTenantAdmin, platformauth.RoleViewer, http.StatusUnauthorized},
+		{"tenant-admin", "developer", platformauth.RoleTenantAdmin, platformauth.RoleDeveloper, http.StatusOK},
+		{"platform", "developer", platformauth.RolePlatformAdmin, platformauth.RolePlatformAdmin, http.StatusOK},
+	} {
+		t.Run(tc.actor+"-"+tc.target+"-"+string(tc.role), func(t *testing.T) {
+			token, err := platformauth.IssueAccessToken(secret, tc.actor, "tenant-a", tc.actorRole, "controlplane", time.Now(), time.Hour)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodPut, "/api/v1/tenants/tenant-a/members/"+tc.target, bytes.NewBufferString(`{"role":"`+string(tc.role)+`"}`))
+			req.Header.Set("Authorization", "Bearer "+token)
+			res := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(res, req)
+			if res.Code != tc.want {
+				t.Fatalf("status=%d want=%d: %s", res.Code, tc.want, res.Body.String())
+			}
+		})
+	}
+}
+
+func TestDeploymentSelectsClusterAndCallsItsAdapter(t *testing.T) {
+	called := make(chan clients.CreateDeploymentSpec, 1)
+	synced := make(chan struct{}, 1)
+	routes := &recordedGateway{registered: make(chan routeURLs, 4), unregistered: make(chan string, 1)}
+	adapter := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/tenants/tenant-a/provision" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0})
+			return
+		}
+		if r.Method == http.MethodGet {
+			select {
+			case synced <- struct{}{}:
+			default:
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": clients.K8sDeploymentResult{Name: "cluster-aware", Endpoint: "cluster-aware.tenant-tenant-a.svc.cluster.local", StableEndpoint: "cluster-aware-stable.tenant-tenant-a.svc.cluster.local", CanaryEndpoint: "cluster-aware-canary.tenant-tenant-a.svc.cluster.local", RolloutStatus: "Healthy", Status: &clients.K8sDeploymentStatus{Replicas: 2, ReadyReplicas: 2, AvailableReplicas: 2, Condition: "Available"}}})
+			return
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/deployments" {
+			http.NotFound(w, r)
+			return
+		}
+		var spec clients.CreateDeploymentSpec
+		if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
+			t.Error(err)
+		}
+		called <- spec
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": clients.K8sDeploymentResult{DeploymentID: spec.DeploymentID, Name: spec.Name, Endpoint: "model.tenant-default.svc.cluster.local", Status: &clients.K8sDeploymentStatus{Replicas: spec.Replicas, ReadyReplicas: spec.Replicas, AvailableReplicas: spec.Replicas, Condition: "Available"}}})
+	}))
+	defer adapter.Close()
+	clusterService := mustClusterService(t)
+	if _, err := clusterService.Register("gpu-west", "west", "https://k8s-west.example.test", adapter.URL, "kubeconfig", nil, []string{domain.RuntimeVLLM}, nil, "https://{service}.{namespace}.west.example.test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := clusterService.Report("gpu-west", "healthy", []clusters.Capacity{{GPUType: "A100", Total: 8, Allocatable: 8}}); err != nil {
+		t.Fatal(err)
+	}
+	repo := data.NewMemoryDeploymentRepository()
+	kube := newMockKube()
+	useCase := biz.NewDeploymentUseCase(repo, &mockModelClient{}, kube)
+	useCase.SetClusterPlacement(clusterService, clients.NewClusterAdapterPool(clusterService, clients.NewK8sAdapterClient("http://unused.invalid")))
+	useCase.SetGateway(routes)
+	created, err := useCase.CreateDeployment(context.Background(), &apitypes.CreateDeploymentRequest{IdempotencyKey: "cluster-aware", Name: "cluster-aware", TenantID: "tenant-a", ModelVersionID: "v1", Replicas: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.ClusterID != "gpu-west" {
+		t.Fatalf("deployment placed on %q", created.ClusterID)
+	}
+	select {
+	case spec := <-called:
+		if spec.ClusterID != "gpu-west" || spec.Name != created.Name {
+			t.Fatalf("cluster assignment not forwarded to adapter: %+v", spec)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("selected cluster adapter was not called")
+	}
+	select {
+	case <-synced:
+	case <-time.After(3 * time.Second):
+		t.Fatal("deployment status was not read from selected adapter")
+	}
+	select {
+	case route := <-routes.registered:
+		if route.endpoint != "https://cluster-aware.tenant-tenant-a.west.example.test" || route.stable != "https://cluster-aware-stable.tenant-tenant-a.west.example.test" || route.canary != "https://cluster-aware-canary.tenant-tenant-a.west.example.test" {
+			t.Fatalf("gateway got unreachable endpoints: %+v", route)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("gateway route not registered")
+	}
+	stored, err := repo.Get(created.ID)
+	if err != nil || stored.Endpoint != "https://cluster-aware.tenant-tenant-a.west.example.test" {
+		t.Fatalf("stored endpoint=%q err=%v", stored.Endpoint, err)
+	}
+	if err := clusterService.SetServingURLTemplate("gpu-west", "https://{service}.{namespace}.new-west.example.test"); err != nil {
+		t.Fatal(err)
+	}
+	useCase.SyncFromK8s(context.Background(), created.ID)
+	select {
+	case route := <-routes.registered:
+		if route.endpoint != "https://cluster-aware.tenant-tenant-a.new-west.example.test" {
+			t.Fatalf("gateway route not reconciled: %+v", route)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("updated ingress route was not registered")
+	}
+	if err := clusterService.UpdatePolicy("gpu-west", nil, []string{domain.RuntimeVLLM}, []string{"tenant-b"}); err != nil {
+		t.Fatal(err)
+	}
+	useCase.SyncFromK8s(context.Background(), created.ID)
+	if current, err := repo.Get(created.ID); err != nil || current.Status != domain.DeploymentStatusRunning {
+		t.Fatalf("policy change disrupted running deployment: %+v %v", current, err)
+	}
+	select {
+	case <-routes.unregistered:
+		t.Fatal("policy change removed an existing route")
+	default:
+	}
+	if err := clusterService.Report("gpu-west", "unhealthy", nil); err != nil {
+		t.Fatal(err)
+	}
+	useCase.SyncFromK8s(context.Background(), created.ID)
+	select {
+	case name := <-routes.unregistered:
+		if name != created.Name {
+			t.Fatalf("wrong route removed: %s", name)
+		}
+	default:
+		t.Fatal("failed cluster kept gateway route")
+	}
+	failed, err := repo.Get(created.ID)
+	if err != nil || failed.Status != domain.DeploymentStatusFailed {
+		t.Fatalf("deployment was not failed after cluster outage: %+v %v", failed, err)
+	}
+	if err := clusterService.Report("gpu-west", "healthy", []clusters.Capacity{{GPUType: "A100", Total: 8, Allocatable: 8}}); err != nil {
+		t.Fatal(err)
+	}
+	useCase.SyncFromK8s(context.Background(), created.ID)
+	select {
+	case route := <-routes.registered:
+		t.Fatalf("failed deployment was silently restored: %+v", route)
+	default:
+	}
+}
+
+func TestManualClusterRebuildRequiresAdminAndSubmitsToTarget(t *testing.T) {
+	const secret = "cluster-rebuild-secret"
+	called := make(chan clients.CreateDeploymentSpec, 1)
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/tenants/tenant-a/provision" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0})
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/deployments" {
+			var spec clients.CreateDeploymentSpec
+			_ = json.NewDecoder(r.Body).Decode(&spec)
+			called <- spec
+			_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": clients.K8sDeploymentResult{Name: spec.Name, Endpoint: "model.svc", Status: &clients.K8sDeploymentStatus{ReadyReplicas: spec.Replicas, Replicas: spec.Replicas, Condition: "Available"}}})
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"code": 0, "data": clients.K8sDeploymentResult{Name: "model-a", Endpoint: "model.svc", Status: &clients.K8sDeploymentStatus{ReadyReplicas: 1, Replicas: 1, Condition: "Available"}}})
+	}))
+	defer target.Close()
+	clusterService := mustClusterService(t)
+	for _, tc := range []struct{ id, url string }{{"gpu-west", target.URL}, {"gpu-east", target.URL}} {
+		if _, err := clusterService.Register(tc.id, tc.id, "https://k8s.example.test", tc.url, "secret", nil, []string{domain.RuntimeVLLM}, nil, "https://{service}.{namespace}.example.test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := clusterService.Report("gpu-west", "unhealthy", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := clusterService.Report("gpu-east", "healthy", []clusters.Capacity{{GPUType: "A100", Total: 8, Allocatable: 8}}); err != nil {
+		t.Fatal(err)
+	}
+	repo := data.NewMemoryDeploymentRepository()
+	if err := repo.Create(&domain.ModelDeployment{ID: "deployment-a", Name: "model-a", ModelVersionID: "v1", ModelID: "m1", ModelVersion: "v1", TenantID: "tenant-a", Namespace: "tenant-tenant-a", ClusterID: "gpu-west", Runtime: domain.RuntimeVLLM, Replicas: 1, Resource: domain.Resource{GPUType: "A100", GPUCount: 1}, Status: domain.DeploymentStatusFailed, Diagnostics: "目标集群不可用: heartbeat unhealthy"}); err != nil {
+		t.Fatal(err)
+	}
+	uc := biz.NewDeploymentUseCase(repo, &mockModelClient{}, newMockKube())
+	uc.SetClusterPlacement(clusterService, clients.NewClusterAdapterPool(clusterService, clients.NewK8sAdapterClient("http://unused.invalid")))
+	srv := NewServer(uc, nil, nil, nil, repo, slog.Default())
+	srv.SetIdentityService(identity.NewService(secret))
+	admin, _ := platformauth.IssueAccessToken(secret, "admin", "", platformauth.RolePlatformAdmin, "controlplane", time.Now(), time.Hour)
+	viewer, _ := platformauth.IssueAccessToken(secret, "viewer", "tenant-a", platformauth.RoleViewer, "controlplane", time.Now(), time.Hour)
+	call := func(token, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/deployments/deployment-a/rebuild", bytes.NewBufferString(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		res := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(res, req)
+		return res
+	}
+	valid := `{"targetClusterId":"gpu-east","acknowledgeOrphanedResources":true}`
+	if got := call(viewer, valid); got.Code != http.StatusUnauthorized {
+		t.Fatalf("viewer rebuilt: %d", got.Code)
+	}
+	if got := call(admin, `{"targetClusterId":"gpu-east"}`); got.Code != http.StatusBadRequest {
+		t.Fatalf("missing acknowledgement accepted: %d", got.Code)
+	}
+	if got := call(admin, valid); got.Code != http.StatusOK {
+		t.Fatalf("rebuild rejected: %d %s", got.Code, got.Body.String())
+	}
+	if got := call(admin, valid); got.Code == http.StatusOK {
+		t.Fatal("duplicate rebuild accepted")
+	}
+	select {
+	case spec := <-called:
+		if spec.ClusterID != "gpu-east" || spec.DeploymentID != "deployment-a" {
+			t.Fatalf("wrong target: %+v", spec)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("target adapter was not called")
+	}
+}
+
+type routeURLs struct{ endpoint, stable, canary string }
+type recordedGateway struct {
+	registered   chan routeURLs
+	unregistered chan string
+}
+
+func (g *recordedGateway) RegisterRoute(_ context.Context, _, _, endpoint, _, _, _, stable, canary, _ string) error {
+	g.registered <- routeURLs{endpoint, stable, canary}
+	return nil
+}
+func (g *recordedGateway) UnregisterRoute(_ context.Context, model string) error {
+	if g.unregistered != nil {
+		g.unregistered <- model
+	}
+	return nil
+}
+
+func mustClusterService(t *testing.T) *clusters.Service {
+	t.Helper()
+	service, err := clusters.NewService(clusters.NewMemoryRepository(), []byte("0123456789abcdef0123456789abcdef"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return service
 }

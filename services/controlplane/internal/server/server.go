@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -18,6 +19,7 @@ import (
 	"kk-infra/lib/middleware"
 	"kk-infra/services/controlplane/internal/biz"
 	"kk-infra/services/controlplane/internal/clients"
+	"kk-infra/services/controlplane/internal/clusters"
 	"kk-infra/services/controlplane/internal/data"
 	"kk-infra/services/controlplane/internal/identity"
 )
@@ -35,6 +37,7 @@ type Server struct {
 	provisioner   interface {
 		ProvisionTenant(context.Context, string) error
 	}
+	clusters *clusters.Service
 }
 
 // NewServer 创建服务
@@ -48,6 +51,7 @@ func (s *Server) SetObservabilityClient(c *clients.ObservabilityClient) {
 }
 
 func (s *Server) SetIdentityService(service *identity.Service) { s.identity = service }
+func (s *Server) SetClusterService(service *clusters.Service)  { s.clusters = service }
 func (s *Server) SetTenantProvisioner(p interface {
 	ProvisionTenant(context.Context, string) error
 }) {
@@ -62,6 +66,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/refresh", s.handleRefresh)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.handleLogout)
 	mux.HandleFunc("POST /api/v1/auth/introspect", s.handleIntrospect)
+	mux.HandleFunc("POST /api/v1/clusters", s.handleRegisterCluster)
+	mux.HandleFunc("GET /api/v1/clusters", s.handleListClusters)
+	mux.HandleFunc("POST /api/v1/clusters/{id}/heartbeat", s.handleClusterHeartbeat)
+	mux.HandleFunc("POST /api/v1/clusters/{id}/agent-token", s.handleClusterAgentToken)
+	mux.HandleFunc("PUT /api/v1/clusters/{id}/serving-route", s.handleUpdateClusterServingRoute)
+	mux.HandleFunc("PUT /api/v1/clusters/{id}/placement-policy", s.handleUpdateClusterPolicy)
+	mux.HandleFunc("PUT /api/v1/clusters/{id}/credentials", s.handleRotateClusterCredentials)
+	mux.HandleFunc("DELETE /api/v1/clusters/{id}", s.handleDeleteCluster)
 	mux.HandleFunc("POST /api/v1/users", s.handleCreateUser)
 	mux.HandleFunc("GET /api/v1/tenants/{tenantId}/members", s.handleListMembers)
 	mux.HandleFunc("PUT /api/v1/tenants/{tenantId}/members/{userId}", s.handleSetMember)
@@ -73,6 +85,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/deployments/{id}", s.handleGetDeployment)
 	mux.HandleFunc("POST /api/v1/deployments/{id}/scale", s.handleScaleDeployment)
 	mux.HandleFunc("POST /api/v1/deployments/{id}/restart", s.handleRestartDeployment)
+	mux.HandleFunc("POST /api/v1/deployments/{id}/rebuild", s.handleRebuildDeployment)
 	mux.HandleFunc("POST /api/v1/deployments/{id}/upgrade", s.handleUpgradeDeployment)
 	mux.HandleFunc("POST /api/v1/deployments/{id}/rollback", s.handleRollbackDeployment)
 	mux.HandleFunc("GET /api/v1/deployments/{id}/revisions", s.handleDeploymentRevisions)
@@ -124,6 +137,231 @@ func (s *Server) handleIntrospect(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) clusterAdmin(w http.ResponseWriter, r *http.Request) bool {
+	if s.clusters == nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrIllegalState, "集群注册服务未配置加密密钥"))
+		return false
+	}
+	claims := claimsFrom(r.Context())
+	if s.identity == nil || claims == nil || claims.Role != platformauth.RolePlatformAdmin {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "需要平台管理员权限"))
+		return false
+	}
+	return true
+}
+
+func (s *Server) handleRegisterCluster(w http.ResponseWriter, r *http.Request) {
+	if !s.clusterAdmin(w, r) {
+		return
+	}
+	var req struct {
+		ID                 string            `json:"id"`
+		Name               string            `json:"name"`
+		Endpoint           string            `json:"endpoint"`
+		AdapterURL         string            `json:"adapterUrl"`
+		ServingURLTemplate string            `json:"servingUrlTemplate"`
+		Kubeconfig         string            `json:"kubeconfig"`
+		Labels             map[string]string `json:"labels"`
+		SupportedRuntimes  []string          `json:"supportedRuntimes"`
+		AllowedTenants     []string          `json:"allowedTenants"`
+	}
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, "请求体解析失败"))
+		return
+	}
+	cluster, err := s.clusters.Register(req.ID, req.Name, req.Endpoint, req.AdapterURL, req.Kubeconfig, req.Labels, req.SupportedRuntimes, req.AllowedTenants, req.ServingURLTemplate)
+	if err != nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, err.Error()))
+		return
+	}
+	apitypes.WriteResult(w, r, cluster, nil)
+}
+
+func (s *Server) handleUpdateClusterServingRoute(w http.ResponseWriter, r *http.Request) {
+	if !s.clusterAdmin(w, r) {
+		return
+	}
+	var req struct {
+		ServingURLTemplate string `json:"servingUrlTemplate"`
+	}
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, "请求体解析失败"))
+		return
+	}
+	if err := s.clusters.SetServingURLTemplate(r.PathValue("id"), req.ServingURLTemplate); err != nil {
+		code := errcode.ErrBadRequest
+		if errors.Is(err, clusters.ErrNotFound) {
+			code = errcode.ErrNotFound
+		}
+		apitypes.WriteResult(w, r, nil, errcode.New(code, err.Error()))
+		return
+	}
+	if s.audit != nil {
+		s.audit.Record("cluster.serving_route.update", claimsFrom(r.Context()).Subject, "", r.PathValue("id"), middleware.GetRequestID(r.Context()), "更新跨集群推理入口模板")
+	}
+	cluster, err := s.clusters.Get(r.PathValue("id"))
+	if err != nil {
+		apitypes.WriteResult(w, r, nil, errcode.Wrap(errcode.ErrInternal, "查询集群失败", err))
+		return
+	}
+	apitypes.WriteResult(w, r, cluster, nil)
+}
+
+func (s *Server) handleListClusters(w http.ResponseWriter, r *http.Request) {
+	if !s.clusterAdmin(w, r) {
+		return
+	}
+	clusters, err := s.clusters.List()
+	if err != nil {
+		apitypes.WriteResult(w, r, nil, errcode.Wrap(errcode.ErrInternal, "查询集群失败", err))
+		return
+	}
+	apitypes.WriteResult(w, r, clusters, nil)
+}
+
+func (s *Server) handleUpdateClusterPolicy(w http.ResponseWriter, r *http.Request) {
+	if !s.clusterAdmin(w, r) {
+		return
+	}
+	var req struct {
+		Labels            map[string]string `json:"labels"`
+		SupportedRuntimes []string          `json:"supportedRuntimes"`
+		AllowedTenants    []string          `json:"allowedTenants"`
+	}
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, "请求体解析失败"))
+		return
+	}
+	if err := s.clusters.UpdatePolicy(r.PathValue("id"), req.Labels, req.SupportedRuntimes, req.AllowedTenants); err != nil {
+		s.clusterWriteError(w, r, err)
+		return
+	}
+	if s.audit != nil {
+		s.audit.Record("cluster.policy.update", claimsFrom(r.Context()).Subject, "", r.PathValue("id"), middleware.GetRequestID(r.Context()), "更新集群放置策略")
+	}
+	c, _ := s.clusters.Get(r.PathValue("id"))
+	apitypes.WriteResult(w, r, c, nil)
+}
+
+func (s *Server) handleRotateClusterCredentials(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if !s.clusterAdmin(w, r) {
+		return
+	}
+	var req struct {
+		Kubeconfig string `json:"kubeconfig"`
+	}
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, "请求体解析失败"))
+		return
+	}
+	if err := s.clusters.RotateCredentials(r.PathValue("id"), req.Kubeconfig); err != nil {
+		s.clusterWriteError(w, r, err)
+		return
+	}
+	if s.audit != nil {
+		s.audit.Record("cluster.credentials.rotate", claimsFrom(r.Context()).Subject, "", r.PathValue("id"), middleware.GetRequestID(r.Context()), "轮换集群访问凭据")
+	}
+	apitypes.WriteResult(w, r, map[string]bool{"rotated": true}, nil)
+}
+
+func (s *Server) handleDeleteCluster(w http.ResponseWriter, r *http.Request) {
+	if !s.clusterAdmin(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	deployments, err := s.deployments.ListDeployments("")
+	if err != nil {
+		apitypes.WriteResult(w, r, nil, errcode.Wrap(errcode.ErrInternal, "查询部署失败", err))
+		return
+	}
+	for _, d := range deployments {
+		if d.ClusterID == id && d.Status != domain.DeploymentStatusDeleted {
+			apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrIllegalState, "集群仍有未删除的部署"))
+			return
+		}
+	}
+	if err := s.clusters.Delete(id); err != nil {
+		s.clusterWriteError(w, r, err)
+		return
+	}
+	if s.audit != nil {
+		s.audit.Record("cluster.delete", claimsFrom(r.Context()).Subject, "", id, middleware.GetRequestID(r.Context()), "注销集群")
+	}
+	apitypes.WriteResult(w, r, map[string]bool{"deleted": true}, nil)
+}
+
+func (s *Server) clusterWriteError(w http.ResponseWriter, r *http.Request, err error) {
+	code := errcode.ErrBadRequest
+	if errors.Is(err, clusters.ErrNotFound) {
+		code = errcode.ErrNotFound
+	}
+	apitypes.WriteResult(w, r, nil, errcode.New(code, err.Error()))
+}
+
+func (s *Server) handleClusterAgentToken(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if !s.clusterAdmin(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	if _, err := s.clusters.Get(id); err != nil {
+		code := errcode.ErrInternal
+		if errors.Is(err, clusters.ErrNotFound) {
+			code = errcode.ErrNotFound
+		}
+		apitypes.WriteResult(w, r, nil, errcode.New(code, "查询集群失败"))
+		return
+	}
+	token, expires, err := s.identity.IssueClusterAgentToken(id)
+	if err != nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrInternal, "签发集群 token 失败"))
+		return
+	}
+	if s.audit != nil {
+		s.audit.Record("cluster.agent_token.issue", claimsFrom(r.Context()).Subject, "", id, middleware.GetRequestID(r.Context()), "签发集群心跳凭据")
+	}
+	apitypes.WriteResult(w, r, map[string]any{"token": token, "expiresAt": expires}, nil)
+}
+
+func (s *Server) handleClusterHeartbeat(w http.ResponseWriter, r *http.Request) {
+	if s.clusters == nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrIllegalState, "集群注册服务未配置加密密钥"))
+		return
+	}
+	if s.identity == nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrIllegalState, "身份服务未配置"))
+		return
+	}
+	clusterID := r.PathValue("id")
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if token == "" {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "缺少 Bearer Token"))
+		return
+	}
+	if _, err := s.identity.AuthenticateClusterAgent(token, clusterID); err != nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "集群 agent token 无效"))
+		return
+	}
+	var req struct {
+		HealthStatus string              `json:"healthStatus"`
+		GPUCapacity  []clusters.Capacity `json:"gpuCapacity"`
+	}
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, "请求体解析失败"))
+		return
+	}
+	if err := s.clusters.Report(r.PathValue("id"), req.HealthStatus, req.GPUCapacity); err != nil {
+		code := errcode.ErrBadRequest
+		if errors.Is(err, clusters.ErrNotFound) {
+			code = errcode.ErrNotFound
+		}
+		apitypes.WriteResult(w, r, nil, errcode.New(code, err.Error()))
+		return
+	}
+	apitypes.WriteResult(w, r, map[string]bool{"accepted": true}, nil)
 }
 
 func (s *Server) billingRows(w http.ResponseWriter, r *http.Request) ([]clients.DailyUsage, bool) {
@@ -202,6 +440,10 @@ func canAccessTenant(ctx context.Context, tenantID string) bool {
 func (s *Server) authRequired(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/v1/auth/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/v1/clusters/") && strings.HasSuffix(r.URL.Path, "/heartbeat") {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -363,6 +605,18 @@ func (s *Server) handleSetMember(w http.ResponseWriter, r *http.Request) {
 		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, "请求体解析失败"))
 		return
 	}
+	if claimsFrom(r.Context()).Role != platformauth.RolePlatformAdmin {
+		protected := req.Role == platformauth.RolePlatformAdmin
+		for _, member := range s.identity.Members(tenantID) {
+			if member.UserID == r.PathValue("userId") && member.Role == platformauth.RolePlatformAdmin {
+				protected = true
+			}
+		}
+		if protected {
+			apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "只有平台管理员可以授予或修改平台管理员身份"))
+			return
+		}
+	}
 	if err := s.identity.SetMember(r.PathValue("userId"), tenantID, req.Role); err != nil {
 		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, "设置成员失败"))
 		return
@@ -472,6 +726,24 @@ func (s *Server) handleRestartDeployment(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	apitypes.WriteResult(w, r, d, nil)
+}
+
+func (s *Server) handleRebuildDeployment(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFrom(r.Context())
+	if s.identity == nil || claims == nil || claims.Role != platformauth.RolePlatformAdmin {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "需要平台管理员权限"))
+		return
+	}
+	var req struct {
+		TargetClusterID              string `json:"targetClusterId"`
+		AcknowledgeOrphanedResources bool   `json:"acknowledgeOrphanedResources"`
+	}
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, "请求体解析失败"))
+		return
+	}
+	d, err := s.deployments.RebuildDeployment(r.Context(), r.PathValue("id"), req.TargetClusterID, claims.Subject, req.AcknowledgeOrphanedResources)
+	apitypes.WriteResult(w, r, d, err)
 }
 
 func (s *Server) handleUpgradeDeployment(w http.ResponseWriter, r *http.Request) {

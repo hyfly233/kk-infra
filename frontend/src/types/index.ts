@@ -12,6 +12,7 @@ export interface ApiResponse<T = unknown> {
 // ---- 模型 ----
 
 export interface Model {
+  tenantId: string
   id: string
   name: string
   description: string
@@ -22,6 +23,7 @@ export interface Model {
 export type ModelVersionStatus = 'REGISTERED' | 'VALIDATING' | 'VALIDATED' | 'RELEASED' | 'UNAVAILABLE'
 
 export interface ModelVersion {
+  tenantId: string
   id: string
   modelId: string
   modelName?: string

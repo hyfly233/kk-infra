@@ -158,8 +158,23 @@ export function validateVersion(versionId: string): Promise<ModelVersion> {
 }
 
 // 发布版本（VALIDATED → RELEASED，发布后才可部署）
-export function releaseVersion(versionId: string): Promise<ModelVersion> {
-  return request(`/model-registry/v1/versions/${versionId}/release`, { method: 'POST' })
+export interface ReleaseRecord {
+  id: string
+  modelVersionId: string
+  tenantId: string
+  status: string
+}
+
+export function fetchLatestRelease(versionId: string): Promise<ReleaseRecord[]> {
+  return request(`/pipeline/v1/releases?limit=1&modelVersionId=${encodeURIComponent(versionId)}`)
+}
+
+export function startRelease(versionId: string, tenantId: string): Promise<ReleaseRecord> {
+  return request('/pipeline/v1/releases', { method: 'POST', body: JSON.stringify({ modelVersionId: versionId, tenantId }) })
+}
+
+export function approveRelease(id: string, approved: boolean): Promise<ReleaseRecord> {
+  return request(`/pipeline/v1/releases/${encodeURIComponent(id)}/approval`, { method: 'POST', body: JSON.stringify({ approved, message: approved ? '控制台人工审批通过' : '控制台人工拒绝发布' }) })
 }
 
 // 删除版本

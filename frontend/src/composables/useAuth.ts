@@ -51,7 +51,7 @@ async function refresh() {
 }
 
 export async function authenticatedFetch(url: string, options: RequestInit = {}): Promise<Response> {
-  if (!['/api/', '/model-registry/', '/gateway/'].some((prefix) => url.startsWith(prefix)) || url.includes('\\')) throw new Error('不允许向外部地址发送会话凭据')
+  if (!['/api/', '/model-registry/', '/gateway/', '/pipeline/'].some((prefix) => url.startsWith(prefix)) || url.includes('\\')) throw new Error('不允许向外部地址发送会话凭据')
   if (!state.value) throw new Error('请先登录')
   if (Date.parse(state.value.expiresAt) - Date.now() < 30_000) await refresh()
   const previousToken = state.value?.accessToken

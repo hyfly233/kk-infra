@@ -29,6 +29,7 @@ test('API uses server-issued token and refuses external targets', async () => {
   await api.authenticatedFetch('/api/v1/notebooks/workspace')
   await api.authenticatedFetch('/model-registry/v1/models')
   await api.authenticatedFetch('/gateway/v1/keys')
+  await api.authenticatedFetch('/pipeline/v1/releases')
   await assert.rejects(api.authenticatedFetch('https://external.example/api/'))
 })
 

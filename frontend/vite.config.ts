@@ -7,6 +7,11 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
+      '/pipeline': {
+        target: 'http://127.0.0.1:8086',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/pipeline/, '/api'),
+      },
       // 控制面 API：模型服务/GPU 资源/部署
       '/api': {
         target: 'http://127.0.0.1:8080',

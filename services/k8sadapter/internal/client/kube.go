@@ -16,6 +16,7 @@ var ErrNotFound = errors.New("deployment not found")
 // DeploymentSpec 创建部署的入参（由 controlplane 通过 HTTP 传入）
 type DeploymentSpec struct {
 	DeploymentID   string            `json:"deploymentId"`
+	ClusterID      string            `json:"clusterId,omitempty"`
 	Name           string            `json:"name"`
 	Namespace      string            `json:"namespace"`
 	Replicas       int32             `json:"replicas"`

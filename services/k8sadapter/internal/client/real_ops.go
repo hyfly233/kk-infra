@@ -68,9 +68,14 @@ func (c *RealKubeClient) ensure(ctx context.Context, getPath, postPath string, b
 type nodeList struct {
 	Items []struct {
 		Metadata struct {
-			Name string `json:"name"`
+			Name   string            `json:"name"`
+			Labels map[string]string `json:"labels"`
 		} `json:"metadata"`
+		Spec struct {
+			Unschedulable bool `json:"unschedulable"`
+		} `json:"spec"`
 		Status struct {
+			Capacity    map[string]string `json:"capacity"`
 			Allocatable map[string]string `json:"allocatable"`
 			Conditions  []struct {
 				Type   string `json:"type"`
@@ -91,28 +96,45 @@ func (c *RealKubeClient) ListGPUNodes(ctx context.Context) ([]domain.GPUResource
 	}
 	// 统计真实 GPU
 	realFound := false
+	var usedByNode map[string]int32
+	for _, n := range list.Items {
+		if parseInt(n.Status.Allocatable["nvidia.com/gpu"]) > 0 {
+			var err error
+			usedByNode, err = c.gpuRequestsByNode(ctx)
+			if err != nil {
+				return nil, err
+			}
+			break
+		}
+	}
 	for _, n := range list.Items {
 		gpuTotal := parseInt(n.Status.Allocatable["nvidia.com/gpu"])
-		gpuType := "A100" // 真实集群可扩展从标签读取，MVP 简化
+		gpuType := n.Metadata.Labels["carrot.ai/gpu-type"]
+		if gpuType == "" {
+			gpuType = n.Metadata.Labels["nvidia.com/gpu.product"]
+		}
+		if gpuType == "" {
+			gpuType = "unknown"
+		}
 		if gpuTotal > 0 {
 			realFound = true
-			healthy := true
+			healthy := false
 			for _, cond := range n.Status.Conditions {
-				if cond.Type == "Ready" && cond.Status != "True" {
-					healthy = false
+				if cond.Type == "Ready" && cond.Status == "True" {
+					healthy = true
 				}
 			}
 			health := domain.GPUHealthHealthy
-			if !healthy {
+			if !healthy || n.Spec.Unschedulable || gpuType == "unknown" {
 				health = domain.GPUHealthError
 			}
 			out = append(out, domain.GPUResource{
 				NodeName:    n.Metadata.Name,
 				GPUType:     gpuType,
-				Total:       gpuTotal,
+				Total:       max(gpuTotal, parseInt(n.Status.Capacity["nvidia.com/gpu"])),
 				Allocatable: gpuTotal,
-				Used:        0,
-				MemoryMB:    81920,
+				Used:        usedByNode[n.Metadata.Name],
+				MemoryMB:    int64(parseInt(n.Metadata.Labels["nvidia.com/gpu.memory"])),
 				Utilization: 0,
 				Health:      health,
 			})
@@ -741,6 +763,9 @@ func renderDeploymentManifests(spec *DeploymentSpec, ns, image string, gpuEnable
 		labels[k] = v
 	}
 	labels["app"] = spec.Name
+	if spec.ClusterID != "" {
+		labels["carrot.ai/cluster-id"] = spec.ClusterID
+	}
 	modelPath := spec.ModelPath
 	if spec.ArtifactURI != "" {
 		modelPath = "/models/model"

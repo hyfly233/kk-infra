@@ -97,14 +97,44 @@ func (f *FakeKubeClient) ListGPUNodes(ctx context.Context) ([]domain.GPUResource
 
 // usedGPUOnNode 统计某节点已用 GPU（Running/Starting 阶段的部署副本数 × GPU/副本）
 func (f *FakeKubeClient) usedGPUOnNode(nodeName string) int32 {
+	var gpuType string
+	for _, n := range f.nodes {
+		if n.NodeName == nodeName {
+			gpuType = n.GPUType
+			break
+		}
+	}
+	if gpuType == "" {
+		return 0
+	}
 	var used int32
-	// 简单模拟：按部署顺序平均分散到节点
 	for _, d := range f.deploys {
-		if d.Stage >= 1 {
+		if d.Stage >= 1 && d.Spec.Resource.GPUType == gpuType {
 			used += d.Spec.Replicas * d.Spec.Resource.GPUCount
 		}
 	}
-	return used
+	// Deterministically fill matching nodes once; retain overflow on the last
+	// node so an overcommitted Fake cluster is not reported as healthy capacity.
+	last := -1
+	for i, n := range f.nodes {
+		if n.GPUType == gpuType {
+			last = i
+		}
+	}
+	for i, n := range f.nodes {
+		if n.GPUType != gpuType {
+			continue
+		}
+		allocated := min(used, n.GPUCount)
+		if i == last {
+			allocated = used
+		}
+		if n.NodeName == nodeName {
+			return allocated
+		}
+		used -= allocated
+	}
+	return 0
 }
 
 // NodeGPUCapacity 返回指定 GPU 类型容量

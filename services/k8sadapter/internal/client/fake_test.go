@@ -32,6 +32,31 @@ func TestFakeListGPUNodes(t *testing.T) {
 	}
 }
 
+func TestFakeGPUNodeOccupancyDoesNotDuplicateAcrossNodes(t *testing.T) {
+	f := NewFakeKubeClient([]FakeNodeConfig{
+		{NodeName: "a1", GPUType: "A100", GPUCount: 8},
+		{NodeName: "a2", GPUType: "A100", GPUCount: 8},
+		{NodeName: "h1", GPUType: "H100", GPUCount: 4},
+	})
+	f.deploys["a"] = &FakeDeployment{Stage: 1, Spec: DeploymentSpec{Replicas: 1, Resource: domain.Resource{GPUType: "A100", GPUCount: 12}}}
+	f.deploys["h"] = &FakeDeployment{Stage: 1, Spec: DeploymentSpec{Replicas: 1, Resource: domain.Resource{GPUType: "H100", GPUCount: 2}}}
+	nodes, err := f.ListGPUNodes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nodes[0].Used != 8 || nodes[1].Used != 4 || nodes[2].Used != 2 {
+		t.Fatalf("duplicated or mixed GPU occupancy: %+v", nodes)
+	}
+	f.deploys["a"].Spec.Resource.GPUCount = 17
+	nodes, err = f.ListGPUNodes(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nodes[1].Used != 9 {
+		t.Fatalf("overcommit hidden from heartbeat: %+v", nodes)
+	}
+}
+
 // 创建部署 → 生命周期推进 → Running
 func TestFakeDeploymentLifecycle(t *testing.T) {
 	f := NewFakeKubeClient(DefaultFakeNodes())

@@ -24,4 +24,4 @@ Place Go unit tests beside their source as `*_test.go` and use the standard `tes
 
 ## Commit & Pull Request Guidelines
 
-Recent history uses only `commit` as the subject, so it provides no useful convention. Prefer short imperative subjects with an optional scope, for example `gateway: reject unauthorized models`. Keep commits focused. Pull requests should describe affected services, behavior changes, and verification commands; link relevant issues or `TODO.md` items, and include screenshots for console changes. Never commit credentials, API keys, kubeconfigs, or local database settings.
+Recent history uses only `commit` as the subject, so it provides no useful convention. Prefer short imperative subjects with an optional scope, for example `gateway: reject unauthorized models`. Keep commits focused. Pull requests should describe affected services, behavior changes, and verification commands; link relevant issues or roadmap items, and include screenshots for console changes. Never commit credentials, API keys, kubeconfigs, or local database settings.

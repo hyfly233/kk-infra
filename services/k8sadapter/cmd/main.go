@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"kk-infra/services/k8sadapter/internal/agent"
 	"kk-infra/services/k8sadapter/internal/client"
 	"kk-infra/services/k8sadapter/internal/server"
 )
@@ -31,6 +32,9 @@ func main() {
 	volcanoEnabled := flag.Bool("volcano-enabled", false, "使用 Volcano Queue/PodGroup 调度 GPU 工作负载")
 	volcanoQueuePrefix := flag.String("volcano-queue-prefix", "tenant-", "Volcano 租户队列名称前缀")
 	disaggProxyImage := flag.String("disaggregated-proxy-image", "", "启用 Prefill/Decode 时使用的 disaggproxy 镜像；为空则拒绝该模式")
+	clusterID := flag.String("cluster-id", "", "已注册集群 ID；设置后启用每 30 秒容量心跳")
+	controlplaneURL := flag.String("controlplane-url", "", "集群心跳接收端 controlplane URL")
+	agentTokenFile := flag.String("cluster-agent-token-file", "", "集群专属 JWT 文件（每次心跳重新读取，支持 Secret 轮换）")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -67,6 +71,14 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if *clusterID != "" || *controlplaneURL != "" || *agentTokenFile != "" {
+		reporter, err := agent.New(kube, *controlplaneURL, *clusterID, *agentTokenFile)
+		if err != nil {
+			logger.Error("集群 agent 配置无效", "err", err)
+			os.Exit(1)
+		}
+		go reporter.Run(ctx, logger)
+	}
 
 	go func() {
 		logger.Info("HTTP 服务监听", "addr", *addr)

@@ -90,3 +90,68 @@ func TestDisableTenantBlocksTenantState(t *testing.T) {
 		t.Fatal("disabled tenant accepted")
 	}
 }
+
+func TestCurrentMembershipRevokesAccessAndRefresh(t *testing.T) {
+	for _, change := range []string{"tenant-disabled", "user-disabled", "member-removed", "role-changed"} {
+		t.Run(change, func(t *testing.T) {
+			s := NewService("secret")
+			if _, err := s.CreateUser("u", "u@example.test", "test-password"); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.SetMember("u", "tenant-a", platformauth.RoleTenantAdmin); err != nil {
+				t.Fatal(err)
+			}
+			session, err := s.Login("u@example.test", "test-password", "tenant-a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Authenticate(session.AccessToken); err != nil {
+				t.Fatal(err)
+			}
+			switch change {
+			case "tenant-disabled":
+				if err := s.DisableTenant("tenant-a"); err != nil {
+					t.Fatal(err)
+				}
+			case "user-disabled":
+				s.users["u"].Disabled = true
+			case "member-removed":
+				delete(s.members, memberKey("u", "tenant-a"))
+			case "role-changed":
+				if err := s.SetMember("u", "tenant-a", platformauth.RoleViewer); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := s.Authenticate(session.AccessToken); err == nil {
+				t.Fatal("old access token remains authorized")
+			}
+			fresh, err := s.Refresh(session.RefreshToken)
+			if change == "role-changed" {
+				if err != nil || fresh.Role != platformauth.RoleViewer {
+					t.Fatalf("refresh preserved old role: %+v %v", fresh, err)
+				}
+				if _, err := s.Authenticate(fresh.AccessToken); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err == nil {
+					t.Fatal("revoked membership refreshed")
+				}
+				if _, err := s.Login("u@example.test", "test-password", "tenant-a"); err == nil {
+					t.Fatal("revoked membership logged in")
+				}
+			}
+		})
+	}
+}
+
+func TestSignedUnknownPrincipalCannotAuthenticate(t *testing.T) {
+	s := NewService("secret")
+	token, err := platformauth.IssueAccessToken("secret", "unknown", "tenant-a", platformauth.RolePlatformAdmin, "controlplane", time.Now(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Authenticate(token); err == nil {
+		t.Fatal("signature alone authorized unknown principal")
+	}
+}

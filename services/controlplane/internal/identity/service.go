@@ -2,6 +2,7 @@
 package identity
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"sync"
@@ -112,6 +113,25 @@ func (s *Service) TenantActive(tenantID string) bool {
 	disabled, ok := s.tenants[tenantID]
 	return !ok || !disabled
 }
+
+// TenantServingActive does not allow unknown tenants or stale PostgreSQL snapshots.
+func (s *Service) TenantServingActive(ctx context.Context, tenantID string) (bool, error) {
+	if tenantID == "" {
+		return false, nil
+	}
+	if s.db != nil {
+		var disabled bool
+		err := s.db.QueryRowContext(ctx, `SELECT disabled FROM tenants WHERE id=$1`, tenantID).Scan(&disabled)
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return !disabled && err == nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	disabled, exists := s.tenants[tenantID]
+	return exists && !disabled, nil
+}
 func (s *Service) DisableTenant(tenantID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -209,6 +229,7 @@ func (s *Service) Bootstrap(id, email, password, tenantID string) (*User, error)
 	s.users[id] = u
 	s.byEmail[email] = id
 	s.members[memberKey(id, tenantID)] = m
+	s.tenants[tenantID] = false
 	return u, nil
 }
 
@@ -246,6 +267,17 @@ func (s *Service) SetMember(userID, tenantID string, role platformauth.Role) err
 		return fmt.Errorf("invalid role")
 	}
 	m := Member{UserID: userID, TenantID: tenantID, Role: role}
+	if tenantID == "" {
+		return fmt.Errorf("tenant required")
+	}
+	if _, exists := s.tenants[tenantID]; !exists {
+		if s.db != nil {
+			if _, err := s.db.Exec(`INSERT INTO tenants(id,disabled) VALUES($1,false) ON CONFLICT(id) DO NOTHING`, tenantID); err != nil {
+				return err
+			}
+		}
+		s.tenants[tenantID] = false
+	}
 	if err := s.saveMember(m); err != nil {
 		return err
 	}
@@ -276,8 +308,8 @@ func (s *Service) Login(email, password, tenantID string) (*Session, error) {
 	if u.Disabled || !platformauth.VerifyPassword(u.PasswordHash, password) {
 		return nil, fmt.Errorf("invalid credentials")
 	}
-	m, ok := s.members[memberKey(id, tenantID)]
-	if !ok {
+	m, err := s.currentMemberLocked(context.Background(), id, tenantID)
+	if err != nil {
 		return nil, fmt.Errorf("tenant access denied")
 	}
 	return s.issueLocked(u.ID, m)
@@ -291,11 +323,15 @@ func (s *Service) Refresh(token string) (*Session, error) {
 	if err != nil || r == nil || r.Revoked || !r.ExpiresAt.After(s.now()) {
 		return nil, fmt.Errorf("invalid refresh token")
 	}
+	m, err := s.currentMemberLocked(context.Background(), r.UserID, r.TenantID)
+	if err != nil {
+		return nil, err
+	}
 	if err := s.revokeRefresh(hash); err != nil {
 		return nil, err
 	}
 	r.Revoked = true
-	return s.issueLocked(r.UserID, Member{TenantID: r.TenantID, UserID: r.UserID, Role: r.Role})
+	return s.issueLocked(r.UserID, m)
 }
 func (s *Service) Logout(token string) {
 	s.mu.Lock()
@@ -326,7 +362,40 @@ func (s *Service) issueLocked(userID string, m Member) (*Session, error) {
 }
 
 func (s *Service) Authenticate(token string) (*platformauth.Claims, error) {
-	return platformauth.ParseAccessToken(s.secret, token, "controlplane")
+	claims, err := platformauth.ParseAccessToken(s.secret, token, "controlplane")
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, err := s.currentMemberLocked(context.Background(), claims.Subject, claims.TenantID)
+	if err != nil || m.Role != claims.Role {
+		return nil, fmt.Errorf("current membership unavailable or role changed")
+	}
+	return claims, nil
+}
+
+// Caller holds s.mu. A bounded live query prevents multi-process role snapshots
+// from keeping a revoked or downgraded identity authorized.
+func (s *Service) currentMemberLocked(ctx context.Context, userID, tenantID string) (Member, error) {
+	m := Member{UserID: userID, TenantID: tenantID}
+	if s.db != nil {
+		ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		var disabled, tenantDisabled bool
+		err := s.db.QueryRowContext(ctx, `SELECT u.disabled,t.disabled,m.role FROM users u JOIN tenant_members m ON m.user_id=u.id JOIN tenants t ON t.id=m.tenant_id WHERE u.id=$1 AND m.tenant_id=$2`, userID, tenantID).Scan(&disabled, &tenantDisabled, &m.Role)
+		if err != nil || disabled || tenantDisabled {
+			return Member{}, fmt.Errorf("current membership unavailable")
+		}
+		return m, nil
+	}
+	u := s.users[userID]
+	m, ok := s.members[memberKey(userID, tenantID)]
+	disabled, exists := s.tenants[tenantID]
+	if u == nil || u.Disabled || !ok || !exists || disabled {
+		return Member{}, fmt.Errorf("current membership unavailable")
+	}
+	return m, nil
 }
 
 func (s *Service) IssueClusterMonitorToken() (string, time.Time, error) {

@@ -1,6 +1,7 @@
 package identity
 
 import (
+	"context"
 	"fmt"
 	platformauth "kk-infra/lib/auth"
 	"regexp"
@@ -22,19 +23,9 @@ func (s *Service) NotebookIdentity(token, audience string) (*platformauth.Claims
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.db != nil {
-		var disabled, tenantDisabled bool
-		var role platformauth.Role
-		err := s.db.QueryRow(`SELECT u.disabled,t.disabled,m.role FROM users u JOIN tenant_members m ON m.user_id=u.id JOIN tenants t ON t.id=m.tenant_id WHERE u.id=$1 AND m.tenant_id=$2`, claims.Subject, claims.TenantID).Scan(&disabled, &tenantDisabled, &role)
-		if err != nil || disabled || tenantDisabled || role != claims.Role {
-			return nil, fmt.Errorf("notebook membership unavailable")
-		}
-	} else {
-		u := s.users[claims.Subject]
-		member, ok := s.members[memberKey(claims.Subject, claims.TenantID)]
-		if u == nil || u.Disabled || !ok || s.tenants[claims.TenantID] || member.Role != claims.Role {
-			return nil, fmt.Errorf("notebook membership unavailable")
-		}
+	member, err := s.currentMemberLocked(context.Background(), claims.Subject, claims.TenantID)
+	if err != nil || member.Role != claims.Role {
+		return nil, fmt.Errorf("notebook membership unavailable")
 	}
 	return claims, nil
 }

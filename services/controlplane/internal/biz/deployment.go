@@ -11,6 +11,7 @@ import (
 	"kk-infra/lib/domain"
 	"kk-infra/lib/errcode"
 	"kk-infra/services/controlplane/internal/clients"
+	"kk-infra/services/controlplane/internal/clusters"
 	"kk-infra/services/controlplane/internal/data"
 )
 
@@ -33,10 +34,30 @@ type K8sClient interface {
 
 // GatewayClient 管理部署完成后的推理路由。
 type GatewayClient interface {
-	RegisterRoute(ctx context.Context, model, modelID, endpoint, tenantID, deploymentID, stableEndpoint, canaryEndpoint, rolloutStatus string) error
+	RegisterRoute(ctx context.Context, model, modelID, endpoint, tenantID, deploymentID, clusterID, stableEndpoint, canaryEndpoint, rolloutStatus string) error
 	UnregisterRoute(ctx context.Context, model string) error
 }
 type TenantState interface{ TenantActive(tenantID string) bool }
+
+type ClusterDeploymentClient interface {
+	CreateDeploymentForCluster(context.Context, string, *clients.CreateDeploymentSpec) (*clients.K8sDeploymentResult, error)
+	UpdateDeploymentForCluster(context.Context, string, *clients.CreateDeploymentSpec) (*clients.K8sDeploymentResult, error)
+	GetDeploymentForCluster(context.Context, string, string, string) (*clients.K8sDeploymentResult, error)
+	ListDeploymentsForCluster(context.Context, string, string) ([]*clients.K8sDeploymentResult, error)
+	ScaleDeploymentForCluster(context.Context, string, string, string, int32) (*clients.K8sDeploymentResult, error)
+	RestartDeploymentForCluster(context.Context, string, string, string) (*clients.K8sDeploymentResult, error)
+	DeleteDeploymentForCluster(context.Context, string, string, string) error
+}
+
+type ClusterSelector interface {
+	Get(string) (clusters.Cluster, error)
+	Select(domain.Resource, string, string) (clusters.Cluster, error)
+	SelectWithServingRoute(domain.Resource, string, string) (clusters.Cluster, error)
+	ResolveServingEndpoint(string, string, string) (string, error)
+	CheckCapacity(string, domain.Resource) error
+	CheckHealth(string) error
+	CheckRuntime(string, string, string) error
+}
 
 // DeploymentUseCase 部署业务用例
 type DeploymentUseCase struct {
@@ -54,8 +75,10 @@ type DeploymentUseCase struct {
 	// 审计日志（R2-4，可为 nil 表示不记录）
 	audit *AuditUseCase
 	// gateway 可为 nil，供不启动推理网关的单元测试使用。
-	gateway GatewayClient
-	tenants TenantState
+	gateway         GatewayClient
+	tenants         TenantState
+	clusterKube     ClusterDeploymentClient
+	clusterSelector ClusterSelector
 }
 
 // NewDeploymentUseCase 创建用例
@@ -85,6 +108,64 @@ func (uc *DeploymentUseCase) SetGateway(gateway GatewayClient) {
 	uc.gateway = gateway
 }
 func (uc *DeploymentUseCase) SetTenantState(tenants TenantState) { uc.tenants = tenants }
+func (uc *DeploymentUseCase) SetClusterPlacement(selector ClusterSelector, kube ClusterDeploymentClient) {
+	uc.clusterSelector, uc.clusterKube = selector, kube
+}
+
+func (uc *DeploymentUseCase) createK8sDeployment(ctx context.Context, clusterID string, spec *clients.CreateDeploymentSpec) (*clients.K8sDeploymentResult, error) {
+	if clusterID != "" {
+		if uc.clusterKube == nil {
+			return nil, fmt.Errorf("cluster adapter pool is not configured")
+		}
+		return uc.clusterKube.CreateDeploymentForCluster(ctx, clusterID, spec)
+	}
+	return uc.kube.CreateDeployment(ctx, spec)
+}
+func (uc *DeploymentUseCase) updateK8sDeployment(ctx context.Context, clusterID string, spec *clients.CreateDeploymentSpec) (*clients.K8sDeploymentResult, error) {
+	if clusterID != "" {
+		if uc.clusterKube == nil {
+			return nil, fmt.Errorf("cluster adapter pool is not configured")
+		}
+		return uc.clusterKube.UpdateDeploymentForCluster(ctx, clusterID, spec)
+	}
+	return uc.kube.UpdateDeployment(ctx, spec)
+}
+func (uc *DeploymentUseCase) getK8sDeployment(ctx context.Context, clusterID, name, namespace string) (*clients.K8sDeploymentResult, error) {
+	if clusterID != "" {
+		if uc.clusterKube == nil {
+			return nil, fmt.Errorf("cluster adapter pool is not configured")
+		}
+		return uc.clusterKube.GetDeploymentForCluster(ctx, clusterID, name, namespace)
+	}
+	return uc.kube.GetDeployment(ctx, name, namespace)
+}
+func (uc *DeploymentUseCase) scaleK8sDeployment(ctx context.Context, clusterID, name, namespace string, replicas int32) (*clients.K8sDeploymentResult, error) {
+	if clusterID != "" {
+		if uc.clusterKube == nil {
+			return nil, fmt.Errorf("cluster adapter pool is not configured")
+		}
+		return uc.clusterKube.ScaleDeploymentForCluster(ctx, clusterID, name, namespace, replicas)
+	}
+	return uc.kube.ScaleDeployment(ctx, name, namespace, replicas)
+}
+func (uc *DeploymentUseCase) restartK8sDeployment(ctx context.Context, clusterID, name, namespace string) (*clients.K8sDeploymentResult, error) {
+	if clusterID != "" {
+		if uc.clusterKube == nil {
+			return nil, fmt.Errorf("cluster adapter pool is not configured")
+		}
+		return uc.clusterKube.RestartDeploymentForCluster(ctx, clusterID, name, namespace)
+	}
+	return uc.kube.RestartDeployment(ctx, name, namespace)
+}
+func (uc *DeploymentUseCase) deleteK8sDeployment(ctx context.Context, clusterID, name, namespace string) error {
+	if clusterID != "" {
+		if uc.clusterKube == nil {
+			return fmt.Errorf("cluster adapter pool is not configured")
+		}
+		return uc.clusterKube.DeleteDeploymentForCluster(ctx, clusterID, name, namespace)
+	}
+	return uc.kube.DeleteDeployment(ctx, name, namespace)
+}
 
 // SetDeploymentImage 设置部署镜像（验证环境注入 mock 镜像）
 func (uc *DeploymentUseCase) SetDeploymentImage(image string) {
@@ -119,6 +200,8 @@ func (uc *DeploymentUseCase) CreateDeployment(ctx context.Context, req *apitypes
 	if servingMode == domain.ServingModeDisaggregated && version.Runtime != domain.RuntimeVLLM {
 		return nil, errcode.New(errcode.ErrBadRequest, "disaggregated 模式仅支持 vLLM")
 	}
+	resource := domain.Resource{GPUType: version.GPUType, GPUCount: version.GPUCount, MemoryMB: version.MemoryMB}
+	clusterID := ""
 
 	// 2. 校验资源配额（GPU 足够 + 租户配额）
 	tenantID := req.TenantID
@@ -128,8 +211,37 @@ func (uc *DeploymentUseCase) CreateDeployment(ctx context.Context, req *apitypes
 	if uc.tenants != nil && !uc.tenants.TenantActive(tenantID) {
 		return nil, errcode.New(errcode.ErrUnauthorized, "租户已禁用，不能创建部署")
 	}
-	if err := uc.checkGPUQuota(ctx, version.GPUType, version.GPUCount, req.Replicas); err != nil {
-		return nil, err
+	if uc.clusterSelector != nil {
+		placementResource := resource
+		placementReplicas := req.Replicas
+		if placementReplicas <= 0 {
+			placementReplicas = 1
+		}
+		placementResource.GPUCount *= placementReplicas
+		var cluster clusters.Cluster
+		var err error
+		if uc.gateway != nil {
+			cluster, err = uc.clusterSelector.SelectWithServingRoute(placementResource, version.Runtime, tenantID)
+		} else {
+			cluster, err = uc.clusterSelector.Select(placementResource, version.Runtime, tenantID)
+		}
+		if err != nil {
+			return nil, errcode.Wrap(errcode.ErrIllegalState, "没有符合条件的集群", err)
+		}
+		clusterID = cluster.ID
+	} else {
+		if err := uc.checkGPUQuota(ctx, version.GPUType, version.GPUCount, req.Replicas); err != nil {
+			return nil, err
+		}
+	}
+	namespace := req.Namespace
+	if namespace == "" {
+		namespace = "tenant-" + tenantID
+	}
+	if clusterID != "" && uc.gateway != nil {
+		if _, err := uc.clusterSelector.ResolveServingEndpoint(clusterID, req.Name, namespace); err != nil {
+			return nil, errcode.Wrap(errcode.ErrIllegalState, "集群推理入口不可用", err)
+		}
 	}
 	// R2-4：租户配额预留
 	if uc.quota != nil {
@@ -144,10 +256,6 @@ func (uc *DeploymentUseCase) CreateDeployment(ctx context.Context, req *apitypes
 
 	// 3. 构建部署对象
 	now := uc.now()
-	namespace := req.Namespace
-	if namespace == "" {
-		namespace = "tenant-" + tenantID
-	}
 	d := &domain.ModelDeployment{
 		ID:             req.IdempotencyKey,
 		Name:           req.Name,
@@ -157,6 +265,7 @@ func (uc *DeploymentUseCase) CreateDeployment(ctx context.Context, req *apitypes
 		ModelVersion:   version.Version,
 		TenantID:       tenantID,
 		Namespace:      namespace,
+		ClusterID:      clusterID,
 		Replicas:       req.Replicas,
 		Resource: domain.Resource{
 			GPUType:  version.GPUType,
@@ -206,6 +315,66 @@ func (uc *DeploymentUseCase) submit(ctx context.Context, d *domain.ModelDeployme
 	}
 	time.Sleep(200 * time.Millisecond) // 模拟校验耗时
 	uc.transition(d.ID, domain.DeploymentStatusValidating, domain.DeploymentStatusSubmitting, "校验通过，提交 Kubernetes")
+	uc.submitToK8s(ctx, d)
+}
+
+// RebuildDeployment explicitly recreates a failed deployment on another cluster.
+// The old cluster may still hold orphaned workloads; callers must acknowledge this risk.
+func (uc *DeploymentUseCase) RebuildDeployment(ctx context.Context, id, targetCluster, actor string, acknowledgeOrphans bool) (*domain.ModelDeployment, error) {
+	if !acknowledgeOrphans || targetCluster == "" {
+		return nil, errcode.New(errcode.ErrBadRequest, "targetClusterId 和 acknowledgeOrphanedResources=true 必填")
+	}
+	d, err := uc.repo.Get(id)
+	if err != nil {
+		return nil, errcode.New(errcode.ErrNotFound, "部署不存在")
+	}
+	if d.ClusterID == "" || d.ClusterID == targetCluster || d.Status != domain.DeploymentStatusFailed || !strings.HasPrefix(d.Diagnostics, "目标集群不可用:") {
+		return nil, errcode.New(errcode.ErrIllegalState, "仅允许将目标集群故障导致的失败部署重建到其他集群")
+	}
+	if uc.clusterSelector == nil {
+		return nil, errcode.New(errcode.ErrIllegalState, "集群放置服务未配置")
+	}
+	old, err := uc.clusterSelector.Get(d.ClusterID)
+	if err != nil {
+		return nil, errcode.Wrap(errcode.ErrIllegalState, "查询原集群失败", err)
+	}
+	if old.HealthStatus == "healthy" {
+		return nil, errcode.New(errcode.ErrIllegalState, "原集群已恢复；请先核实旧工作负载状态")
+	}
+	if err := uc.clusterSelector.CheckRuntime(targetCluster, d.Runtime, d.TenantID); err != nil {
+		return nil, errcode.Wrap(errcode.ErrIllegalState, "目标集群不可用", err)
+	}
+	need := d.Resource
+	need.GPUCount *= d.Replicas
+	if err := uc.clusterSelector.CheckCapacity(targetCluster, need); err != nil {
+		return nil, errcode.Wrap(errcode.ErrIllegalState, "目标集群容量不足", err)
+	}
+	if uc.gateway != nil {
+		if _, err := uc.clusterSelector.ResolveServingEndpoint(targetCluster, d.Name, d.Namespace); err != nil {
+			return nil, errcode.Wrap(errcode.ErrIllegalState, "目标集群推理入口不可用", err)
+		}
+	}
+	oldCluster := d.ClusterID
+	claimed, err := uc.repo.ClaimClusterRebuild(id, oldCluster, targetCluster, uc.now())
+	if err != nil {
+		if err == data.ErrConflict {
+			return nil, errcode.New(errcode.ErrIllegalState, "部署状态已改变，请刷新后重试")
+		}
+		return nil, errcode.Wrap(errcode.ErrInternal, "锁定重建操作失败", err)
+	}
+	uc.recordEvent(id, domain.DeploymentStatusFailed, domain.DeploymentStatusSubmitting, "人工跨集群重建；原集群 "+oldCluster+" 可能残留资源", getRequestID(ctx), "")
+	if err := uc.recordRevision(claimed); err != nil {
+		uc.failDeployment(id, "记录重建修订失败: "+err.Error())
+		return nil, errcode.Wrap(errcode.ErrInternal, "记录重建修订失败", err)
+	}
+	if uc.audit != nil {
+		uc.audit.Record("deployment.cluster_rebuild", actor, d.TenantID, id, getRequestID(ctx), "从 "+oldCluster+" 重建到 "+targetCluster+"；需清理原集群残留资源")
+	}
+	go uc.submitToK8s(context.Background(), claimed)
+	return claimed, nil
+}
+
+func (uc *DeploymentUseCase) submitToK8s(ctx context.Context, d *domain.ModelDeployment) {
 	version, err := uc.models.GetVersion(ctx, d.ModelVersionID)
 	if err != nil || !version.Deployable() {
 		uc.failDeployment(d.ID, "模型 artifact 元数据不可用")
@@ -216,6 +385,7 @@ func (uc *DeploymentUseCase) submit(ctx context.Context, d *domain.ModelDeployme
 	// 提交 K8s
 	spec := &clients.CreateDeploymentSpec{
 		DeploymentID: d.ID,
+		ClusterID:    d.ClusterID,
 		Name:         d.Name,
 		Namespace:    d.Namespace,
 		Replicas:     d.Replicas,
@@ -235,19 +405,24 @@ func (uc *DeploymentUseCase) submit(ctx context.Context, d *domain.ModelDeployme
 		Runtime:        d.Runtime,
 		ServingMode:    d.ServingMode,
 	}
-	res, err := uc.kube.CreateDeployment(ctx, spec)
+	res, err := uc.createK8sDeployment(ctx, d.ClusterID, spec)
 	if err != nil {
 		uc.failDeployment(d.ID, "提交 Kubernetes 失败: "+err.Error())
 		return
 	}
 	uc.transition(d.ID, domain.DeploymentStatusSubmitting, domain.DeploymentStatusStarting, "已创建 Kubernetes 资源")
 
-	// 保存 Endpoint
-	if res.Endpoint != "" {
+	// 保存 Gateway 可达的 Endpoint。
+	if res.Endpoint != "" || (d.ClusterID != "" && uc.gateway != nil) {
+		endpoint, stable, canary, err := uc.servingEndpoints(d, res)
+		if err != nil {
+			uc.failDeployment(d.ID, "集群推理入口解析失败: "+err.Error())
+			return
+		}
 		uc.updateDeployment(d.ID, func(dd *domain.ModelDeployment) {
-			dd.Endpoint = "http://" + res.Endpoint
-			dd.StableEndpoint = endpointURL(res.StableEndpoint)
-			dd.CanaryEndpoint = endpointURL(res.CanaryEndpoint)
+			dd.Endpoint = endpoint
+			dd.StableEndpoint = stable
+			dd.CanaryEndpoint = canary
 			dd.RolloutStatus = res.RolloutStatus
 		})
 	}
@@ -294,7 +469,7 @@ func (uc *DeploymentUseCase) RetryDelete(ctx context.Context, id string) {
 		return
 	}
 	// 幂等重试删除
-	if err := uc.kube.DeleteDeployment(ctx, d.Name, d.Namespace); err != nil {
+	if err := uc.deleteK8sDeployment(ctx, d.ClusterID, d.Name, d.Namespace); err != nil {
 		uc.failDeployment(id, "删除重试失败: "+err.Error())
 		return
 	}
@@ -348,7 +523,7 @@ func (uc *DeploymentUseCase) GetDeploymentWithK8sStatus(ctx context.Context, id 
 	if d.Status == domain.DeploymentStatusDeleted || d.Status == domain.DeploymentStatusDeleting {
 		return d, pv, nil
 	}
-	res, err := uc.kube.GetDeployment(ctx, d.Name, d.Namespace)
+	res, err := uc.getK8sDeployment(ctx, d.ClusterID, d.Name, d.Namespace)
 	if err != nil || res.Status == nil {
 		return d, pv, nil // 降级
 	}
@@ -365,7 +540,15 @@ func (uc *DeploymentUseCase) ListDeployments(tenantID string) ([]*domain.ModelDe
 // ListK8sDeployments 扫描 K8s 中全部受管部署（R2-2：孤儿检测）
 // 返回 map[name]deploymentID；name 用于与本地记录匹配。
 func (uc *DeploymentUseCase) ListK8sDeployments(ctx context.Context, namespace string) (map[string]bool, error) {
-	list, err := uc.kube.ListDeployments(ctx, namespace)
+	var list []*clients.K8sDeploymentResult
+	var err error
+	if allClusters, ok := uc.clusterKube.(interface {
+		ListDeploymentsAcrossClusters(context.Context, string) ([]*clients.K8sDeploymentResult, error)
+	}); ok {
+		list, err = allClusters.ListDeploymentsAcrossClusters(ctx, namespace)
+	} else {
+		list, err = uc.kube.ListDeployments(ctx, namespace)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -387,8 +570,18 @@ func (uc *DeploymentUseCase) ScaleDeployment(ctx context.Context, id string, rep
 	if d.Status != domain.DeploymentStatusRunning && d.Status != domain.DeploymentStatusFailed {
 		return nil, errcode.New(errcode.ErrIllegalState, "当前状态 "+d.Status+" 不允许扩缩容")
 	}
-	// 配额校验
-	if err := uc.checkGPUQuota(ctx, d.Resource.GPUType, d.Resource.GPUCount, replicas); err != nil {
+	// 配额校验；多集群部署在原集群验证新增容量，不重新放置。
+	if d.ClusterID != "" {
+		if uc.clusterSelector == nil {
+			return nil, errcode.New(errcode.ErrIllegalState, "集群放置服务未配置")
+		}
+		delta := (replicas - d.Replicas) * d.Resource.GPUCount
+		if delta > 0 {
+			if err := uc.clusterSelector.CheckCapacity(d.ClusterID, domain.Resource{GPUType: d.Resource.GPUType, GPUCount: delta}); err != nil {
+				return nil, errcode.Wrap(errcode.ErrIllegalState, "原集群容量不足", err)
+			}
+		}
+	} else if err := uc.checkGPUQuota(ctx, d.Resource.GPUType, d.Resource.GPUCount, replicas); err != nil {
 		return nil, err
 	}
 	// R2-4：租户配额（扩容需增加预留，缩容释放）
@@ -414,7 +607,7 @@ func (uc *DeploymentUseCase) ScaleDeployment(ctx context.Context, id string, rep
 	uc.repo.Update(d)
 
 	// 调 K8s
-	res, err := uc.kube.ScaleDeployment(ctx, d.Name, d.Namespace, replicas)
+	res, err := uc.scaleK8sDeployment(ctx, d.ClusterID, d.Name, d.Namespace, replicas)
 	if err != nil {
 		uc.failDeployment(id, "扩缩容失败: "+err.Error())
 		return nil, errcode.Wrap(errcode.ErrInternal, "扩缩容失败", err)
@@ -443,7 +636,7 @@ func (uc *DeploymentUseCase) RestartDeployment(ctx context.Context, id string) (
 		return nil, errcode.New(errcode.ErrIllegalState, "当前状态 "+d.Status+" 不允许重启")
 	}
 	uc.transition(id, d.Status, domain.DeploymentStatusRestarting, "发起重启")
-	if _, err := uc.kube.RestartDeployment(ctx, d.Name, d.Namespace); err != nil {
+	if _, err := uc.restartK8sDeployment(ctx, d.ClusterID, d.Name, d.Namespace); err != nil {
 		uc.failDeployment(id, "重启失败: "+err.Error())
 		return nil, errcode.Wrap(errcode.ErrInternal, "重启失败", err)
 	}
@@ -474,6 +667,23 @@ func (uc *DeploymentUseCase) UpgradeDeployment(ctx context.Context, id, newVersi
 	if !version.Deployable() {
 		return nil, errcode.New(errcode.ErrModelNotDeployable,
 			"新版本不可部署（状态="+version.Status+"），仅 RELEASED 可升级")
+	}
+	if d.ClusterID != "" {
+		if uc.clusterSelector == nil {
+			return nil, errcode.New(errcode.ErrIllegalState, "集群放置服务未配置")
+		}
+		if err := uc.clusterSelector.CheckRuntime(d.ClusterID, version.Runtime, d.TenantID); err != nil {
+			return nil, errcode.Wrap(errcode.ErrIllegalState, "原集群不支持升级", err)
+		}
+		additional := version.GPUCount * d.Replicas
+		if version.GPUType == d.Resource.GPUType {
+			additional -= d.Resource.GPUCount * d.Replicas
+		}
+		if additional > 0 {
+			if err := uc.clusterSelector.CheckCapacity(d.ClusterID, domain.Resource{GPUType: version.GPUType, GPUCount: additional}); err != nil {
+				return nil, errcode.Wrap(errcode.ErrIllegalState, "原集群容量不足", err)
+			}
+		}
 	}
 	if d.ServingMode == domain.ServingModeDisaggregated && version.Runtime != domain.RuntimeVLLM {
 		return nil, errcode.New(errcode.ErrBadRequest, "disaggregated 部署不能升级到非 vLLM 运行时")
@@ -511,6 +721,7 @@ func (uc *DeploymentUseCase) UpgradeDeployment(ctx context.Context, id, newVersi
 	// 触发 K8s 滚动更新：更新现有 Deployment 的 Pod template。
 	spec := &clients.CreateDeploymentSpec{
 		DeploymentID: updated.ID,
+		ClusterID:    updated.ClusterID,
 		Name:         updated.Name,
 		Namespace:    updated.Namespace,
 		Replicas:     updated.Replicas,
@@ -530,7 +741,7 @@ func (uc *DeploymentUseCase) UpgradeDeployment(ctx context.Context, id, newVersi
 		Runtime:        version.Runtime,
 		ServingMode:    updated.ServingMode,
 	}
-	res, err := uc.kube.UpdateDeployment(ctx, spec)
+	res, err := uc.updateK8sDeployment(ctx, updated.ClusterID, spec)
 	if err != nil {
 		uc.failDeployment(id, "升级失败: "+err.Error())
 		return nil, errcode.Wrap(errcode.ErrInternal, "升级失败", err)
@@ -617,7 +828,7 @@ func (uc *DeploymentUseCase) DeleteDeployment(ctx context.Context, id string) er
 	})
 
 	// 调 K8s 删除（幂等）
-	if err := uc.kube.DeleteDeployment(ctx, d.Name, d.Namespace); err != nil {
+	if err := uc.deleteK8sDeployment(ctx, d.ClusterID, d.Name, d.Namespace); err != nil {
 		uc.failDeployment(id, "删除失败: "+err.Error())
 		return errcode.Wrap(errcode.ErrInternal, "删除失败", err)
 	}
@@ -648,7 +859,22 @@ func (uc *DeploymentUseCase) SyncFromK8s(ctx context.Context, id string) {
 	if err != nil || d.Status == domain.DeploymentStatusDeleted || d.Status == domain.DeploymentStatusDeleting {
 		return
 	}
-	res, err := uc.kube.GetDeployment(ctx, d.Name, d.Namespace)
+	clusterFailure := d.Status == domain.DeploymentStatusFailed && strings.HasPrefix(d.Diagnostics, "目标集群不可用:")
+	if d.ClusterID != "" && uc.clusterSelector != nil && (d.Status == domain.DeploymentStatusRunning || clusterFailure) {
+		if err := uc.clusterSelector.CheckHealth(d.ClusterID); err != nil {
+			if uc.gateway != nil {
+				_ = uc.gateway.UnregisterRoute(ctx, d.Name)
+			}
+			if !clusterFailure {
+				uc.failDeployment(id, "目标集群不可用: "+err.Error())
+				if uc.audit != nil {
+					uc.audit.Record("deployment.cluster_unhealthy", "reconciler", d.TenantID, id, getRequestID(ctx), err.Error())
+				}
+			}
+			return
+		}
+	}
+	res, err := uc.getK8sDeployment(ctx, d.ClusterID, d.Name, d.Namespace)
 	if err != nil {
 		// 不存在说明可能还没创建完，忽略
 		return
@@ -656,9 +882,18 @@ func (uc *DeploymentUseCase) SyncFromK8s(ctx context.Context, id string) {
 	if res.Status == nil {
 		return
 	}
-	stableEndpoint, canaryEndpoint := endpointURL(res.StableEndpoint), endpointURL(res.CanaryEndpoint)
-	if d.StableEndpoint != stableEndpoint || d.CanaryEndpoint != canaryEndpoint || d.RolloutStatus != res.RolloutStatus {
+	endpoint, stableEndpoint, canaryEndpoint, err := uc.servingEndpoints(d, res)
+	if err != nil {
+		if uc.gateway != nil {
+			_ = uc.gateway.UnregisterRoute(ctx, d.Name)
+		}
+		uc.failDeployment(id, "集群推理入口解析失败: "+err.Error())
+		return
+	}
+	routeChanged := d.Endpoint != endpoint || d.StableEndpoint != stableEndpoint || d.CanaryEndpoint != canaryEndpoint || d.RolloutStatus != res.RolloutStatus
+	if routeChanged {
 		uc.updateDeployment(id, func(current *domain.ModelDeployment) {
+			current.Endpoint = endpoint
 			current.StableEndpoint = stableEndpoint
 			current.CanaryEndpoint = canaryEndpoint
 			current.RolloutStatus = res.RolloutStatus
@@ -666,7 +901,7 @@ func (uc *DeploymentUseCase) SyncFromK8s(ctx context.Context, id string) {
 		d, _ = uc.repo.Get(id)
 	}
 	if d.Status == domain.DeploymentStatusRestarting && uc.gateway != nil && d.Endpoint != "" {
-		if err := uc.gateway.RegisterRoute(ctx, d.Name, d.ModelID, d.Endpoint, d.TenantID, d.ID, d.StableEndpoint, d.CanaryEndpoint, d.RolloutStatus); err != nil {
+		if err := uc.gateway.RegisterRoute(ctx, d.Name, d.ModelID, d.Endpoint, d.TenantID, d.ID, d.ClusterID, d.StableEndpoint, d.CanaryEndpoint, d.RolloutStatus); err != nil {
 			uc.failDeployment(id, "更新网关 rollout 路由失败: "+err.Error())
 			return
 		}
@@ -679,8 +914,8 @@ func (uc *DeploymentUseCase) SyncFromK8s(ctx context.Context, id string) {
 		if uc.sm.CanTransition(d.Status, domain.DeploymentStatusRunning) {
 			uc.transition(id, d.Status, domain.DeploymentStatusRunning, "Pod 就绪")
 		}
-		if uc.gateway != nil && d.Endpoint != "" {
-			if err := uc.gateway.RegisterRoute(ctx, d.Name, d.ModelID, d.Endpoint, d.TenantID, d.ID, d.StableEndpoint, d.CanaryEndpoint, d.RolloutStatus); err != nil {
+		if uc.gateway != nil && d.Endpoint != "" && (routeChanged || d.Status != domain.DeploymentStatusRunning) && d.Status != domain.DeploymentStatusFailed {
+			if err := uc.gateway.RegisterRoute(ctx, d.Name, d.ModelID, d.Endpoint, d.TenantID, d.ID, d.ClusterID, d.StableEndpoint, d.CanaryEndpoint, d.RolloutStatus); err != nil {
 				uc.failDeployment(id, "注册网关路由失败: "+err.Error())
 			}
 		}
@@ -692,6 +927,35 @@ func (uc *DeploymentUseCase) SyncFromK8s(ctx context.Context, id string) {
 		uc.restoreLastStableRevision(ctx, d)
 		uc.failDeployment(id, diag)
 	}
+}
+
+func (uc *DeploymentUseCase) servingEndpoints(d *domain.ModelDeployment, res *clients.K8sDeploymentResult) (endpoint, stable, canary string, err error) {
+	if res.Endpoint == "" {
+		if d.ClusterID != "" && uc.gateway != nil {
+			return "", "", "", fmt.Errorf("cluster adapter did not return a serving endpoint")
+		}
+		return "", "", "", nil
+	}
+	if d.ClusterID == "" || uc.gateway == nil {
+		return endpointURL(res.Endpoint), endpointURL(res.StableEndpoint), endpointURL(res.CanaryEndpoint), nil
+	}
+	endpoint, err = uc.clusterSelector.ResolveServingEndpoint(d.ClusterID, d.Name, d.Namespace)
+	if err != nil {
+		return "", "", "", err
+	}
+	if res.StableEndpoint != "" {
+		stable, err = uc.clusterSelector.ResolveServingEndpoint(d.ClusterID, d.Name+"-stable", d.Namespace)
+		if err != nil {
+			return "", "", "", err
+		}
+	}
+	if res.CanaryEndpoint != "" {
+		canary, err = uc.clusterSelector.ResolveServingEndpoint(d.ClusterID, d.Name+"-canary", d.Namespace)
+		if err != nil {
+			return "", "", "", err
+		}
+	}
+	return endpoint, stable, canary, nil
 }
 
 func endpointURL(endpoint string) string {

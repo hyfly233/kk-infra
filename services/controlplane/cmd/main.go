@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"flag"
 	"log/slog"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"kk-infra/lib/store"
 	"kk-infra/services/controlplane/internal/biz"
 	"kk-infra/services/controlplane/internal/clients"
+	"kk-infra/services/controlplane/internal/clusters"
 	"kk-infra/services/controlplane/internal/data"
 	"kk-infra/services/controlplane/internal/identity"
 	"kk-infra/services/controlplane/internal/server"
@@ -41,6 +43,7 @@ func main() {
 	var repo data.DeploymentRepository
 	var quotaStore data.QuotaStore
 	var auditStore data.AuditStore
+	var clusterRepo clusters.Repository
 	var db *sql.DB
 	if *storage == "postgres" {
 		var err error
@@ -56,18 +59,38 @@ func main() {
 		repo = data.NewPostgresDeploymentRepository(db)
 		quotaStore = data.NewPostgresQuotaStore(db)
 		auditStore = data.NewPostgresAuditStore(db)
+		clusterRepo = clusters.NewPostgresRepository(db)
 		logger.Info("使用 Postgres 存储", "db", store.DefaultConfig().DBName)
 	} else {
 		repo = data.NewMemoryDeploymentRepository()
 		quotaStore = data.NewMemoryQuotaStore()
 		auditStore = data.NewMemoryAuditStore()
+		clusterRepo = clusters.NewMemoryRepository()
 		logger.Info("使用内存存储")
 	}
 
 	modelClient := clients.NewModelRegistryClient(*modelRegistry)
 	kubeClient := clients.NewK8sAdapterClient(*k8sAdapter)
+	var clusterService *clusters.Service
+	if encryptionKey := os.Getenv("CLUSTER_ENCRYPTION_KEY"); encryptionKey != "" {
+		key, err := base64.StdEncoding.DecodeString(encryptionKey)
+		if err != nil || len(key) != 32 {
+			logger.Error("CLUSTER_ENCRYPTION_KEY 必须是 32 字节密钥的标准 Base64 编码")
+			os.Exit(1)
+		}
+		clusterService, err = clusters.NewService(clusterRepo, key)
+		if err != nil {
+			logger.Error("初始化集群注册服务失败", "err", err)
+			os.Exit(1)
+		}
+	} else {
+		logger.Info("集群注册服务未启用", "reason", "CLUSTER_ENCRYPTION_KEY 未设置")
+	}
 
 	deployUse := biz.NewDeploymentUseCase(repo, modelClient, kubeClient)
+	if clusterService != nil {
+		deployUse.SetClusterPlacement(clusterService, clients.NewClusterAdapterPool(clusterService, kubeClient))
+	}
 	if *gatewayURL != "" {
 		deployUse.SetGateway(clients.NewGatewayClient(*gatewayURL))
 	}
@@ -79,6 +102,9 @@ func main() {
 	deployUse.SetAudit(auditUse)
 	resUse := biz.NewResourceUseCase(kubeClient)
 	srv := server.NewServer(deployUse, resUse, quotaUse, auditUse, repo, logger)
+	if clusterService != nil {
+		srv.SetClusterService(clusterService)
+	}
 	srv.SetTenantProvisioner(kubeClient)
 	if *authSecret != "" {
 		identityService := identity.NewService(*authSecret)

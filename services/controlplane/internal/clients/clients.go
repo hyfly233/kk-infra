@@ -14,6 +14,7 @@ import (
 	"kk-infra/lib/apitypes"
 	"kk-infra/lib/domain"
 	"kk-infra/lib/errcode"
+	"kk-infra/services/controlplane/internal/clusters"
 )
 
 // HTTPClient 统一 HTTP 客户端
@@ -158,10 +159,10 @@ func NewGatewayClient(baseURL string) *GatewayClient {
 }
 
 // RegisterRoute 注册或更新可调用模型路由。
-func (c *GatewayClient) RegisterRoute(ctx context.Context, model, modelID, endpoint, tenantID, deploymentID, stableEndpoint, canaryEndpoint, rolloutStatus string) error {
+func (c *GatewayClient) RegisterRoute(ctx context.Context, model, modelID, endpoint, tenantID, deploymentID, clusterID, stableEndpoint, canaryEndpoint, rolloutStatus string) error {
 	body := map[string]string{
 		"model": model, "modelId": modelID, "endpoint": endpoint, "tenantId": tenantID, "deploymentId": deploymentID,
-		"stableEndpoint": stableEndpoint, "canaryEndpoint": canaryEndpoint, "rolloutStatus": rolloutStatus,
+		"clusterId": clusterID, "stableEndpoint": stableEndpoint, "canaryEndpoint": canaryEndpoint, "rolloutStatus": rolloutStatus,
 	}
 	return c.do(ctx, http.MethodPost, "/internal/routes", body, nil)
 }
@@ -199,6 +200,105 @@ type K8sAdapterClient struct {
 	*HTTPClient
 }
 
+type ClusterAdapterResolver interface {
+	Get(string) (clusters.Cluster, error)
+	List() ([]clusters.Cluster, error)
+}
+
+// ClusterAdapterPool routes each persisted deployment operation to its assigned adapter.
+type ClusterAdapterPool struct {
+	resolver ClusterAdapterResolver
+	fallback *K8sAdapterClient
+}
+
+func NewClusterAdapterPool(resolver ClusterAdapterResolver, fallback *K8sAdapterClient) *ClusterAdapterPool {
+	return &ClusterAdapterPool{resolver: resolver, fallback: fallback}
+}
+
+func (p *ClusterAdapterPool) adapter(clusterID string) (*K8sAdapterClient, error) {
+	if clusterID == "" {
+		return p.fallback, nil
+	}
+	cluster, err := p.resolver.Get(clusterID)
+	if err != nil {
+		return nil, err
+	}
+	if cluster.AdapterURL == "" {
+		return nil, fmt.Errorf("cluster %s has no adapter URL", clusterID)
+	}
+	return NewK8sAdapterClient(cluster.AdapterURL), nil
+}
+
+func (p *ClusterAdapterPool) CreateDeploymentForCluster(ctx context.Context, clusterID string, spec *CreateDeploymentSpec) (*K8sDeploymentResult, error) {
+	c, err := p.adapter(clusterID)
+	if err != nil {
+		return nil, err
+	}
+	if tenantID := spec.Labels["carrot.ai/tenant-id"]; tenantID != "" {
+		if err := c.ProvisionTenant(ctx, tenantID); err != nil {
+			return nil, fmt.Errorf("provision tenant in cluster %s: %w", clusterID, err)
+		}
+	}
+	return c.CreateDeployment(ctx, spec)
+}
+func (p *ClusterAdapterPool) UpdateDeploymentForCluster(ctx context.Context, clusterID string, spec *CreateDeploymentSpec) (*K8sDeploymentResult, error) {
+	c, err := p.adapter(clusterID)
+	if err != nil {
+		return nil, err
+	}
+	return c.UpdateDeployment(ctx, spec)
+}
+func (p *ClusterAdapterPool) GetDeploymentForCluster(ctx context.Context, clusterID, name, namespace string) (*K8sDeploymentResult, error) {
+	c, err := p.adapter(clusterID)
+	if err != nil {
+		return nil, err
+	}
+	return c.GetDeployment(ctx, name, namespace)
+}
+func (p *ClusterAdapterPool) ListDeploymentsForCluster(ctx context.Context, clusterID, namespace string) ([]*K8sDeploymentResult, error) {
+	c, err := p.adapter(clusterID)
+	if err != nil {
+		return nil, err
+	}
+	return c.ListDeployments(ctx, namespace)
+}
+func (p *ClusterAdapterPool) ListDeploymentsAcrossClusters(ctx context.Context, namespace string) ([]*K8sDeploymentResult, error) {
+	registered, err := p.resolver.List()
+	if err != nil {
+		return nil, err
+	}
+	var result []*K8sDeploymentResult
+	for _, cluster := range registered {
+		list, err := p.ListDeploymentsForCluster(ctx, cluster.ID, namespace)
+		if err != nil {
+			return nil, fmt.Errorf("list deployments in cluster %s: %w", cluster.ID, err)
+		}
+		result = append(result, list...)
+	}
+	return result, nil
+}
+func (p *ClusterAdapterPool) ScaleDeploymentForCluster(ctx context.Context, clusterID, name, namespace string, replicas int32) (*K8sDeploymentResult, error) {
+	c, err := p.adapter(clusterID)
+	if err != nil {
+		return nil, err
+	}
+	return c.ScaleDeployment(ctx, name, namespace, replicas)
+}
+func (p *ClusterAdapterPool) RestartDeploymentForCluster(ctx context.Context, clusterID, name, namespace string) (*K8sDeploymentResult, error) {
+	c, err := p.adapter(clusterID)
+	if err != nil {
+		return nil, err
+	}
+	return c.RestartDeployment(ctx, name, namespace)
+}
+func (p *ClusterAdapterPool) DeleteDeploymentForCluster(ctx context.Context, clusterID, name, namespace string) error {
+	c, err := p.adapter(clusterID)
+	if err != nil {
+		return err
+	}
+	return c.DeleteDeployment(ctx, name, namespace)
+}
+
 // NewK8sAdapterClient 创建客户端
 func NewK8sAdapterClient(baseURL string) *K8sAdapterClient {
 	return &K8sAdapterClient{NewHTTPClient(baseURL)}
@@ -207,6 +307,7 @@ func NewK8sAdapterClient(baseURL string) *K8sAdapterClient {
 // CreateDeploymentSpec 创建部署入参
 type CreateDeploymentSpec struct {
 	DeploymentID   string            `json:"deploymentId"`
+	ClusterID      string            `json:"clusterId,omitempty"`
 	Name           string            `json:"name"`
 	Namespace      string            `json:"namespace"`
 	Replicas       int32             `json:"replicas"`

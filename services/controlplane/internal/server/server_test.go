@@ -95,6 +95,9 @@ func TestDeploymentPassesVerifiedArtifactToAdapter(t *testing.T) {
 	if kube.lastSpec.ArtifactURI != "s3://models/qwen-7b" || kube.lastSpec.ArtifactDigest != "sha256:0123456789abcdef" {
 		t.Fatalf("verified artifact metadata not forwarded: %+v", kube.lastSpec)
 	}
+	if kube.lastSpec.Runtime != domain.RuntimeVLLM || kube.lastSpec.ServingMode != domain.ServingModeUnified {
+		t.Fatalf("runtime serving profile not forwarded: %+v", kube.lastSpec)
+	}
 }
 
 func (m *mockKubeClient) GetDeployment(ctx context.Context, name, namespace string) (*clients.K8sDeploymentResult, error) {

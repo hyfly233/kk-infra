@@ -27,11 +27,11 @@ type Reconciler struct {
 // NewReconciler 创建对账器
 func NewReconciler(repo data.DeploymentRepository, deployUse *biz.DeploymentUseCase, logger *slog.Logger, interval time.Duration) *Reconciler {
 	return &Reconciler{
-		repo:         repo,
-		deployUse:    deployUse,
-		logger:       logger,
-		interval:     interval,
-		startTimeout: 5 * time.Minute,  // STARTING 5 分钟未就绪判失败
+		repo:          repo,
+		deployUse:     deployUse,
+		logger:        logger,
+		interval:      interval,
+		startTimeout:  5 * time.Minute, // STARTING 5 分钟未就绪判失败
 		deleteTimeout: 3 * time.Minute, // DELETING 3 分钟未完成则重试
 	}
 }
@@ -116,11 +116,7 @@ func (r *Reconciler) reconcileAll(ctx context.Context) {
 			r.deployUse.RetryDelete(ctx, d.ID)
 			continue
 		}
-		// RUNNING 状态：核对副本数（异常打日志，MVP 不做自动修复）
-		if d.Status == domain.DeploymentStatusRunning {
-			continue
-		}
-		// 其他非终态：同步 K8s 实际状态
+		// RUNNING 也要检查集群心跳和入口变化。
 		r.reconcileOne(ctx, d)
 	}
 }

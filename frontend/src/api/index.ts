@@ -175,7 +175,7 @@ export function fetchKeys(): Promise<APIKey[]> {
 }
 
 // 创建 API Key（明文仅返回一次）
-export function issueKey(tenantId = 'default'): Promise<IssueKeyResult> {
+export function issueKey(tenantId?: string): Promise<IssueKeyResult> {
   return request('/gateway/v1/keys', { method: 'POST', body: JSON.stringify({ tenantId }) })
 }
 
@@ -185,8 +185,8 @@ export function disableKey(keyId: string): Promise<{ disabled: boolean }> {
 }
 
 // 轮换 API Key
-export function rotateKey(keyId: string, tenantId = 'default'): Promise<IssueKeyResult> {
-  return request(`/gateway/v1/keys/${keyId}/rotate?tenant=${tenantId}`, { method: 'POST' })
+export function rotateKey(keyId: string): Promise<IssueKeyResult> {
+  return request(`/gateway/v1/keys/${keyId}/rotate`, { method: 'POST' })
 }
 
 // 设置 Key 模型白名单

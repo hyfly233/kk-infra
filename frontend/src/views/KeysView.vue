@@ -4,6 +4,9 @@ import { onMounted, ref } from 'vue'
 import { disableKey, fetchKeys, fetchModels, issueKey, rotateKey, setKeyModels } from '../api'
 import type { APIKey, IssueKeyResult, Model } from '../types'
 import { fmtTime } from '../utils/status'
+import { useAuth } from '../composables/useAuth'
+
+const { tenantId } = useAuth()
 
 const loading = ref(true)
 const error = ref('')
@@ -68,7 +71,7 @@ async function create() {
   createError.value = ''
   creating.value = true
   try {
-    newKey.value = await issueKey('default')
+    newKey.value = await issueKey(tenantId.value)
   } catch (e) {
     createError.value = (e as Error).message
   } finally {
@@ -95,7 +98,7 @@ async function doDisable(k: APIKey) {
 async function doRotate(k: APIKey) {
   if (!confirm(`确认轮换 Key「${k.id}」？旧 Key 将立即失效。`)) return
   try {
-    newKey.value = await rotateKey(k.id, 'default')
+    newKey.value = await rotateKey(k.id)
   } catch (e) {
     alert(`轮换失败: ${(e as Error).message}`)
   }

@@ -42,7 +42,12 @@ func (r *Registry) CreateModel(req *apitypes.CreateModelRequest) (*domain.Model,
 		return nil, errcode.New(errcode.ErrBadRequest, "模型名称必填")
 	}
 	now := time.Now()
+	tenant := req.TenantID
+	if tenant == "" {
+		tenant = "default"
+	}
 	m := &domain.Model{
+		TenantID:    tenant,
 		ID:          newID("m"),
 		Name:        req.Name,
 		Description: req.Description,
@@ -91,7 +96,8 @@ func (r *Registry) DeleteModel(id string) error {
 
 // CreateVersion 注册模型版本
 func (r *Registry) CreateVersion(modelID string, req *apitypes.CreateModelVersionRequest) (*domain.ModelVersion, error) {
-	if _, err := r.repo.GetModel(modelID); err != nil {
+	model, err := r.repo.GetModel(modelID)
+	if err != nil {
 		return nil, errcode.New(errcode.ErrModelNotFound, "模型不存在: "+modelID)
 	}
 	if req.Version == "" || req.ArtifactURI == "" || req.GPUType == "" || req.GPUCount <= 0 {
@@ -109,6 +115,7 @@ func (r *Registry) CreateVersion(modelID string, req *apitypes.CreateModelVersio
 	}
 	now := time.Now()
 	v := &domain.ModelVersion{
+		TenantID:       model.TenantID,
 		ID:             newID("v"),
 		ModelID:        modelID,
 		Version:        req.Version,
@@ -139,28 +146,42 @@ func (r *Registry) GetVersion(versionID string) (*domain.ModelVersion, error) {
 	if err != nil {
 		return nil, data.ToErrCode(err)
 	}
-	// 填充冗余模型名
-	if m, err := r.repo.GetModel(v.ModelID); err == nil {
-		v.ModelName = m.Name
+	m, err := r.repo.GetModel(v.ModelID)
+	if err != nil {
+		return nil, data.ToErrCode(err)
 	}
-	return v, nil
+	copy := *v
+	copy.ModelName, copy.TenantID = m.Name, m.TenantID
+	return &copy, nil
 }
 
 // ListVersions 模型版本列表
 func (r *Registry) ListVersions(modelID string) ([]*domain.ModelVersion, error) {
-	if _, err := r.repo.GetModel(modelID); err != nil {
+	m, err := r.repo.GetModel(modelID)
+	if err != nil {
 		return nil, errcode.New(errcode.ErrModelNotFound, "模型不存在: "+modelID)
 	}
-	return r.repo.ListVersions(modelID)
+	versions, err := r.repo.ListVersions(modelID)
+	if err != nil {
+		return nil, data.ToErrCode(err)
+	}
+	result := make([]*domain.ModelVersion, 0, len(versions))
+	for _, version := range versions {
+		copy := *version
+		copy.ModelName, copy.TenantID = m.Name, m.TenantID
+		result = append(result, &copy)
+	}
+	return result, nil
 }
 
 // ValidateVersion 标记版本校验通过（REGISTERED → VALIDATED）
-func (r *Registry) ValidateVersion(ctx context.Context, versionID string) (*domain.ModelVersion, error) {
+func (r *Registry) ValidateVersion(ctx context.Context, versionID string, revalidate ...bool) (*domain.ModelVersion, error) {
 	v, err := r.repo.GetVersion(versionID)
 	if err != nil {
 		return nil, data.ToErrCode(err)
 	}
-	if !domain.CanTransitionVersion(v.Status, domain.ModelStatusValidated) {
+	freshPipelineCheck := len(revalidate) == 1 && revalidate[0] && v.Status == domain.ModelStatusValidated
+	if !freshPipelineCheck && !domain.CanTransitionVersion(v.Status, domain.ModelStatusValidated) {
 		return nil, errcode.New(errcode.ErrIllegalState,
 			"版本状态为 "+v.Status+"，无法流转到 VALIDATED")
 	}
@@ -174,11 +195,7 @@ func (r *Registry) ValidateVersion(ctx context.Context, versionID string) (*doma
 	if err := r.repo.UpdateVersionStatus(versionID, domain.ModelStatusValidated); err != nil {
 		return nil, data.ToErrCode(err)
 	}
-	v.Status = domain.ModelStatusValidated
-	v.ArtifactDigest = metadata.Digest
-	v.ArtifactSize = metadata.Size
-	v.ArtifactVerifiedAt = &metadata.VerifiedAt
-	return v, nil
+	return r.GetVersion(versionID)
 }
 
 // ReleaseVersion 发布版本（VALIDATED → RELEASED）。
@@ -195,8 +212,7 @@ func (r *Registry) ReleaseVersion(versionID string) (*domain.ModelVersion, error
 	if err := r.repo.UpdateVersionStatus(versionID, domain.ModelStatusReleased); err != nil {
 		return nil, data.ToErrCode(err)
 	}
-	v.Status = domain.ModelStatusReleased
-	return v, nil
+	return r.GetVersion(versionID)
 }
 
 // DeleteVersion 删除模型版本

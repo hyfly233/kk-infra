@@ -38,8 +38,8 @@ func mapErr(err error) error {
 
 func (r *PostgresRepository) CreateModel(m *domain.Model) error {
 	_, err := r.db.Exec(
-		`INSERT INTO models (id, name, description, created_at, updated_at) VALUES ($1,$2,$3,$4,$5)`,
-		m.ID, m.Name, m.Description, m.CreatedAt, m.UpdatedAt,
+		`INSERT INTO models (id, name, description, created_at, updated_at, tenant_id) VALUES ($1,$2,$3,$4,$5,$6)`,
+		m.ID, m.Name, m.Description, m.CreatedAt, m.UpdatedAt, m.TenantID,
 	)
 	return mapErr(err)
 }
@@ -47,21 +47,21 @@ func (r *PostgresRepository) CreateModel(m *domain.Model) error {
 func (r *PostgresRepository) GetModel(id string) (*domain.Model, error) {
 	m := &domain.Model{}
 	err := r.db.QueryRow(
-		`SELECT id, name, description, created_at, updated_at FROM models WHERE id=$1`, id,
-	).Scan(&m.ID, &m.Name, &m.Description, &m.CreatedAt, &m.UpdatedAt)
+		`SELECT id, name, description, created_at, updated_at, tenant_id FROM models WHERE id=$1`, id,
+	).Scan(&m.ID, &m.Name, &m.Description, &m.CreatedAt, &m.UpdatedAt, &m.TenantID)
 	return m, mapErr(err)
 }
 
 func (r *PostgresRepository) GetModelByName(name string) (*domain.Model, error) {
 	m := &domain.Model{}
 	err := r.db.QueryRow(
-		`SELECT id, name, description, created_at, updated_at FROM models WHERE name=$1`, name,
-	).Scan(&m.ID, &m.Name, &m.Description, &m.CreatedAt, &m.UpdatedAt)
+		`SELECT id, name, description, created_at, updated_at, tenant_id FROM models WHERE name=$1`, name,
+	).Scan(&m.ID, &m.Name, &m.Description, &m.CreatedAt, &m.UpdatedAt, &m.TenantID)
 	return m, mapErr(err)
 }
 
 func (r *PostgresRepository) ListModels() ([]*domain.Model, error) {
-	rows, err := r.db.Query(`SELECT id, name, description, created_at, updated_at FROM models ORDER BY created_at DESC`)
+	rows, err := r.db.Query(`SELECT id, name, description, created_at, updated_at, tenant_id FROM models ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -69,7 +69,7 @@ func (r *PostgresRepository) ListModels() ([]*domain.Model, error) {
 	out := make([]*domain.Model, 0)
 	for rows.Next() {
 		m := &domain.Model{}
-		if err := rows.Scan(&m.ID, &m.Name, &m.Description, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.Name, &m.Description, &m.CreatedAt, &m.UpdatedAt, &m.TenantID); err != nil {
 			return nil, err
 		}
 		out = append(out, m)

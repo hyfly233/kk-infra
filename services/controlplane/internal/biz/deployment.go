@@ -4,6 +4,7 @@ package biz
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,6 +51,9 @@ type ClusterDeploymentClient interface {
 }
 
 type ClusterSelector interface {
+	ReserveCapacity(string, clusters.GPUReservation, string) error
+	ReleaseCapacity(string, string) error
+	GrowCapacity(string, string, string, string, int32) error
 	Get(string) (clusters.Cluster, error)
 	Select(domain.Resource, string, string) (clusters.Cluster, error)
 	SelectWithServingRoute(domain.Resource, string, string) (clusters.Cluster, error)
@@ -285,6 +289,9 @@ func (uc *DeploymentUseCase) CreateDeployment(ctx context.Context, req *apitypes
 
 	// 4. 写入状态
 	if err := uc.repo.Create(d); err != nil {
+		if uc.quota != nil {
+			uc.quota.Release(ctx, tenantID, version.GPUType, d.Replicas*version.GPUCount)
+		}
 		if err == data.ErrConflict {
 			return uc.repo.GetByName(req.Name)
 		}
@@ -292,6 +299,13 @@ func (uc *DeploymentUseCase) CreateDeployment(ctx context.Context, req *apitypes
 	}
 	if err := uc.recordRevision(d); err != nil {
 		return nil, errcode.Wrap(errcode.ErrInternal, "记录部署修订失败", err)
+	}
+	if d.ClusterID != "" {
+		reservation := clusters.GPUReservation{DeploymentID: d.ID, TenantID: d.TenantID, Namespace: d.Namespace, ModelVersionID: d.ModelVersionID, TemplateGeneration: d.Generation, GPUType: d.Resource.GPUType, GPUCount: d.Replicas * d.Resource.GPUCount}
+		if err := uc.clusterSelector.ReserveCapacity(d.ClusterID, reservation, d.Runtime); err != nil {
+			uc.failDeployment(d.ID, "集群容量预留失败: "+err.Error())
+			return nil, errcode.Wrap(errcode.ErrIllegalState, "集群容量预留失败；部署已记录，可删除后重试", err)
+		}
 	}
 	uc.recordEvent(d.ID, "", domain.DeploymentStatusNew, "创建部署请求", getRequestID(ctx), "")
 	// R2-4：审计
@@ -345,6 +359,9 @@ func (uc *DeploymentUseCase) RebuildDeployment(ctx context.Context, id, targetCl
 		return nil, errcode.Wrap(errcode.ErrIllegalState, "目标集群不可用", err)
 	}
 	need := d.Resource
+	if int64(need.GPUCount)*int64(d.Replicas) > 1<<31-1 {
+		return nil, errcode.New(errcode.ErrBadRequest, "重建 GPU 请求总量过大")
+	}
 	need.GPUCount *= d.Replicas
 	if err := uc.clusterSelector.CheckCapacity(targetCluster, need); err != nil {
 		return nil, errcode.Wrap(errcode.ErrIllegalState, "目标集群容量不足", err)
@@ -355,7 +372,7 @@ func (uc *DeploymentUseCase) RebuildDeployment(ctx context.Context, id, targetCl
 		}
 	}
 	oldCluster := d.ClusterID
-	claimed, err := uc.repo.ClaimClusterRebuild(id, oldCluster, targetCluster, uc.now())
+	claimed, err := uc.repo.ClaimClusterRebuild(id, oldCluster, targetCluster, d.Generation, uc.now())
 	if err != nil {
 		if err == data.ErrConflict {
 			return nil, errcode.New(errcode.ErrIllegalState, "部署状态已改变，请刷新后重试")
@@ -363,12 +380,24 @@ func (uc *DeploymentUseCase) RebuildDeployment(ctx context.Context, id, targetCl
 		return nil, errcode.Wrap(errcode.ErrInternal, "锁定重建操作失败", err)
 	}
 	uc.recordEvent(id, domain.DeploymentStatusFailed, domain.DeploymentStatusSubmitting, "人工跨集群重建；原集群 "+oldCluster+" 可能残留资源", getRequestID(ctx), "")
+	if uc.audit != nil {
+		uc.audit.Record("deployment.cluster_rebuild", actor, d.TenantID, id, getRequestID(ctx), "从 "+oldCluster+" 认领重建到 "+targetCluster+"；需清理原集群残留资源")
+	}
+	reservation := clusters.GPUReservation{DeploymentID: claimed.ID, TenantID: claimed.TenantID, Namespace: claimed.Namespace, ModelVersionID: claimed.ModelVersionID, TemplateGeneration: claimed.Generation, GPUType: claimed.Resource.GPUType, GPUCount: claimed.Resource.GPUCount * claimed.Replicas}
+	if err := uc.clusterSelector.ReserveCapacity(targetCluster, reservation, claimed.Runtime); err != nil {
+		diagnostics := "目标集群不可用: 原集群 " + oldCluster + "；重建目标容量预留失败: " + err.Error()
+		if restoreErr := uc.repo.AbortClusterRebuild(id, targetCluster, oldCluster, claimed.Generation, diagnostics, uc.now()); restoreErr != nil {
+			return nil, errcode.Wrap(errcode.ErrInternal, "重建未提交，但恢复原集群归属失败；请核实部署状态", restoreErr)
+		}
+		uc.recordEvent(id, domain.DeploymentStatusSubmitting, domain.DeploymentStatusFailed, diagnostics, getRequestID(ctx), "")
+		if uc.audit != nil {
+			uc.audit.Record("deployment.cluster_rebuild.rejected", actor, d.TenantID, id, getRequestID(ctx), "目标 "+targetCluster+" 容量预留失败，恢复原集群 "+oldCluster+" 归属；未提交工作负载")
+		}
+		return nil, errcode.Wrap(errcode.ErrIllegalState, "重建容量预留失败；未提交目标工作负载，原集群残留仍需核实", err)
+	}
 	if err := uc.recordRevision(claimed); err != nil {
 		uc.failDeployment(id, "记录重建修订失败: "+err.Error())
 		return nil, errcode.Wrap(errcode.ErrInternal, "记录重建修订失败", err)
-	}
-	if uc.audit != nil {
-		uc.audit.Record("deployment.cluster_rebuild", actor, d.TenantID, id, getRequestID(ctx), "从 "+oldCluster+" 重建到 "+targetCluster+"；需清理原集群残留资源")
 	}
 	go uc.submitToK8s(context.Background(), claimed)
 	return claimed, nil
@@ -393,11 +422,12 @@ func (uc *DeploymentUseCase) submitToK8s(ctx context.Context, d *domain.ModelDep
 		Image:        uc.deploymentImage,
 		Args:         d.StartupArgs,
 		Labels: map[string]string{
-			"carrot.ai/deployment-id": d.ID,
-			"carrot.ai/model-id":      d.ModelID,
-			"carrot.ai/model-version": d.ModelVersion,
-			"carrot.ai/tenant-id":     d.TenantID,
-			"carrot.ai/managed-by":    "carrot",
+			"carrot.ai/deployment-id":       d.ID,
+			"carrot.ai/template-generation": strconv.FormatInt(d.Generation, 10),
+			"carrot.ai/model-id":            d.ModelID,
+			"carrot.ai/model-version":       d.ModelVersion,
+			"carrot.ai/tenant-id":           d.TenantID,
+			"carrot.ai/managed-by":          "carrot",
 		},
 		ModelPath:      deploymentModelPath(d),
 		ArtifactURI:    artifactURI,
@@ -437,11 +467,15 @@ func (uc *DeploymentUseCase) transition(id, from, to, reason string) error {
 		uc.recordEvent(id, from, to, "非法转换: "+err.Error(), getRequestID(context.Background()), "")
 		return err
 	}
+	current, err := uc.repo.Get(id)
+	if err != nil {
+		return err
+	}
+	if err := uc.repo.CompareStatus(id, from, to, current.Generation, uc.now()); err != nil {
+		return err
+	}
 	uc.recordEvent(id, from, to, reason, getRequestID(context.Background()), "")
-	return uc.updateDeployment(id, func(d *domain.ModelDeployment) {
-		d.Status = to
-		d.UpdatedAt = uc.now()
-	})
+	return nil
 }
 
 // failDeployment 置为失败
@@ -465,18 +499,10 @@ func (uc *DeploymentUseCase) FailDeployment(id, diag string) {
 // RetryDelete 删除重试（DELETING 超时后由 Reconciler 调用，幂等）
 func (uc *DeploymentUseCase) RetryDelete(ctx context.Context, id string) {
 	d, err := uc.repo.Get(id)
-	if err != nil {
+	if err != nil || d.Status != domain.DeploymentStatusDeleting {
 		return
 	}
-	// 幂等重试删除
-	if err := uc.deleteK8sDeployment(ctx, d.ClusterID, d.Name, d.Namespace); err != nil {
-		uc.failDeployment(id, "删除重试失败: "+err.Error())
-		return
-	}
-	uc.recordEvent(id, domain.DeploymentStatusDeleting, domain.DeploymentStatusDeleted, "删除完成（重试）", getRequestID(ctx), "")
-	uc.updateDeployment(id, func(dd *domain.ModelDeployment) {
-		dd.Status = domain.DeploymentStatusDeleted
-	})
+	_ = uc.finishDelete(ctx, d)
 }
 
 // updateDeployment 更新部署（乐观并发）
@@ -538,7 +564,7 @@ func (uc *DeploymentUseCase) ListDeployments(tenantID string) ([]*domain.ModelDe
 }
 
 // ListK8sDeployments 扫描 K8s 中全部受管部署（R2-2：孤儿检测）
-// 返回 map[name]deploymentID；name 用于与本地记录匹配。
+// 返回完整资源身份，避免跨 namespace 或跨集群同名资源互相遮蔽。
 func (uc *DeploymentUseCase) ListK8sDeployments(ctx context.Context, namespace string) (map[string]bool, error) {
 	var list []*clients.K8sDeploymentResult
 	var err error
@@ -554,15 +580,24 @@ func (uc *DeploymentUseCase) ListK8sDeployments(ctx context.Context, namespace s
 	}
 	out := map[string]bool{}
 	for _, res := range list {
-		if res.Name != "" {
-			out[res.Name] = true
+		if res.Name != "" && res.Namespace != "" {
+			out[res.ClusterID+"/"+res.Namespace+"/"+res.Name] = true
 		}
 	}
 	return out, nil
 }
 
+func (uc *DeploymentUseCase) RecordOrphan(identity string) {
+	if uc.audit != nil {
+		uc.audit.Record("deployment.orphan.detected", "reconciler", "", identity, "", "受管资源无匹配部署记录；需核实所属集群和命名空间后人工处置")
+	}
+}
+
 // ScaleDeployment 扩缩容（幂等）
 func (uc *DeploymentUseCase) ScaleDeployment(ctx context.Context, id string, replicas int32) (*domain.ModelDeployment, error) {
+	if replicas < 0 {
+		return nil, errcode.New(errcode.ErrBadRequest, "副本数不能为负数")
+	}
 	d, err := uc.repo.Get(id)
 	if err != nil {
 		return nil, errcode.Wrap(errcode.ErrNotFound, "部署不存在: "+id, err)
@@ -570,49 +605,63 @@ func (uc *DeploymentUseCase) ScaleDeployment(ctx context.Context, id string, rep
 	if d.Status != domain.DeploymentStatusRunning && d.Status != domain.DeploymentStatusFailed {
 		return nil, errcode.New(errcode.ErrIllegalState, "当前状态 "+d.Status+" 不允许扩缩容")
 	}
+	if replicas == d.Replicas && d.Status == domain.DeploymentStatusRunning {
+		return d, nil
+	}
+	if int64(replicas)*int64(d.Resource.GPUCount) > 1<<31-1 {
+		return nil, errcode.New(errcode.ErrBadRequest, "GPU 请求总量过大")
+	}
 	// 配额校验；多集群部署在原集群验证新增容量，不重新放置。
 	if d.ClusterID != "" {
 		if uc.clusterSelector == nil {
 			return nil, errcode.New(errcode.ErrIllegalState, "集群放置服务未配置")
 		}
-		delta := (replicas - d.Replicas) * d.Resource.GPUCount
-		if delta > 0 {
-			if err := uc.clusterSelector.CheckCapacity(d.ClusterID, domain.Resource{GPUType: d.Resource.GPUType, GPUCount: delta}); err != nil {
-				return nil, errcode.Wrap(errcode.ErrIllegalState, "原集群容量不足", err)
-			}
-		}
 	} else if err := uc.checkGPUQuota(ctx, d.Resource.GPUType, d.Resource.GPUCount, replicas); err != nil {
 		return nil, err
 	}
-	// R2-4：租户配额（扩容需增加预留，缩容释放）
+	delta := (replicas - d.Replicas) * d.Resource.GPUCount
+	previousReplicas, previousStatus := d.Replicas, d.Status
+	claimed, err := uc.repo.ClaimScale(id, d.Generation, replicas, uc.now())
+	if err != nil {
+		return nil, errcode.Wrap(errcode.ErrIllegalState, "部署已被其他操作修改，请刷新后重试", err)
+	}
+	d = claimed
+	uc.recordEvent(id, previousStatus, domain.DeploymentStatusScaling, "发起扩缩容到 "+itoa32(replicas), getRequestID(ctx), "")
+	// 缩容确认成功后再释放；扩容失败可能已经创建资源，保留预留。
 	if uc.quota != nil {
-		delta := (replicas - d.Replicas) * d.Resource.GPUCount
 		if delta > 0 {
 			if err := uc.quota.Reserve(ctx, d.TenantID, d.Resource.GPUType, delta); err != nil {
+				uc.updateDeployment(id, func(dd *domain.ModelDeployment) { dd.Replicas = previousReplicas })
+				uc.failDeployment(id, "扩容配额预留失败: "+err.Error())
 				return nil, err
 			}
-		} else if delta < 0 {
-			uc.quota.Release(ctx, d.TenantID, d.Resource.GPUType, -delta)
 		}
 	}
 
-	// 状态机：Running → SCALING
-	if d.Status == domain.DeploymentStatusRunning {
-		if err := uc.transition(id, d.Status, domain.DeploymentStatusScaling, "发起扩缩容到 "+itoa32(replicas)); err != nil {
-			return nil, err
+	if d.ClusterID != "" && delta > 0 {
+		if err := uc.clusterSelector.GrowCapacity(d.ClusterID, d.ID, d.Resource.GPUType, d.ModelVersionID, replicas*d.Resource.GPUCount); err != nil {
+			if uc.quota != nil {
+				uc.quota.Release(ctx, d.TenantID, d.Resource.GPUType, delta)
+			}
+			uc.updateDeployment(id, func(dd *domain.ModelDeployment) { dd.Replicas = previousReplicas })
+			uc.failDeployment(id, "扩容集群容量预留失败: "+err.Error())
+			return nil, errcode.Wrap(errcode.ErrIllegalState, "原集群容量不足或无预留账本", err)
 		}
 	}
-	d.Replicas = replicas
-	d.Generation++
-	uc.repo.Update(d)
 
 	// 调 K8s
 	res, err := uc.scaleK8sDeployment(ctx, d.ClusterID, d.Name, d.Namespace, replicas)
 	if err != nil {
+		if delta < 0 {
+			uc.updateDeployment(id, func(dd *domain.ModelDeployment) { dd.Replicas = previousReplicas })
+		}
 		uc.failDeployment(id, "扩缩容失败: "+err.Error())
 		return nil, errcode.Wrap(errcode.ErrInternal, "扩缩容失败", err)
 	}
 	_ = res
+	if uc.quota != nil && delta < 0 {
+		uc.quota.Release(ctx, d.TenantID, d.Resource.GPUType, -delta)
+	}
 
 	// SCALING → RUNNING
 	if d.Status == domain.DeploymentStatusScaling {
@@ -635,7 +684,10 @@ func (uc *DeploymentUseCase) RestartDeployment(ctx context.Context, id string) (
 	if d.Status != domain.DeploymentStatusRunning {
 		return nil, errcode.New(errcode.ErrIllegalState, "当前状态 "+d.Status+" 不允许重启")
 	}
-	uc.transition(id, d.Status, domain.DeploymentStatusRestarting, "发起重启")
+	if err := uc.repo.CompareStatus(id, d.Status, domain.DeploymentStatusRestarting, d.Generation, uc.now()); err != nil {
+		return nil, errcode.Wrap(errcode.ErrIllegalState, "部署状态已改变", err)
+	}
+	uc.recordEvent(id, d.Status, domain.DeploymentStatusRestarting, "发起重启", getRequestID(ctx), "")
 	if _, err := uc.restartK8sDeployment(ctx, d.ClusterID, d.Name, d.Namespace); err != nil {
 		uc.failDeployment(id, "重启失败: "+err.Error())
 		return nil, errcode.Wrap(errcode.ErrInternal, "重启失败", err)
@@ -668,6 +720,9 @@ func (uc *DeploymentUseCase) UpgradeDeployment(ctx context.Context, id, newVersi
 		return nil, errcode.New(errcode.ErrModelNotDeployable,
 			"新版本不可部署（状态="+version.Status+"），仅 RELEASED 可升级")
 	}
+	if int64(version.GPUCount)*int64(d.Replicas) > 1<<31-1 {
+		return nil, errcode.New(errcode.ErrBadRequest, "升级 GPU 请求总量过大")
+	}
 	if d.ClusterID != "" {
 		if uc.clusterSelector == nil {
 			return nil, errcode.New(errcode.ErrIllegalState, "集群放置服务未配置")
@@ -688,10 +743,22 @@ func (uc *DeploymentUseCase) UpgradeDeployment(ctx context.Context, id, newVersi
 	if d.ServingMode == domain.ServingModeDisaggregated && version.Runtime != domain.RuntimeVLLM {
 		return nil, errcode.New(errcode.ErrBadRequest, "disaggregated 部署不能升级到非 vLLM 运行时")
 	}
+	if err := uc.repo.CompareStatus(id, d.Status, domain.DeploymentStatusRestarting, d.Generation, uc.now()); err != nil {
+		return nil, errcode.Wrap(errcode.ErrIllegalState, "部署状态已改变", err)
+	}
+	uc.recordEvent(id, d.Status, domain.DeploymentStatusRestarting, "升级到版本 "+version.Version, getRequestID(ctx), "")
+	if d.ClusterID != "" {
+		reservation := clusters.GPUReservation{DeploymentID: d.ID, TenantID: d.TenantID, Namespace: d.Namespace, ModelVersionID: version.ID, TemplateGeneration: d.Generation + 1, GPUType: version.GPUType, GPUCount: version.GPUCount * d.Replicas}
+		if err := uc.clusterSelector.ReserveCapacity(d.ClusterID, reservation, version.Runtime); err != nil {
+			uc.failDeployment(id, "升级集群容量预留失败: "+err.Error())
+			return nil, errcode.Wrap(errcode.ErrIllegalState, "升级重叠容量不足；旧模板预留保持不变", err)
+		}
+	}
 	// 配额：新版本 GPU 需求变化时校验（资源规格可能不同）
 	if uc.quota != nil {
 		need := version.GPUCount * d.Replicas
 		if err := uc.quota.Reserve(ctx, d.TenantID, version.GPUType, need); err != nil {
+			uc.failDeployment(id, "升级配额预留失败: "+err.Error())
 			return nil, err
 		}
 		// 释放旧版本占用（GPU 型号/数量可能不同）
@@ -699,7 +766,6 @@ func (uc *DeploymentUseCase) UpgradeDeployment(ctx context.Context, id, newVersi
 	}
 
 	// 更新期望状态
-	uc.transition(id, d.Status, domain.DeploymentStatusRestarting, "升级到版本 "+version.Version)
 	uc.updateDeployment(id, func(dd *domain.ModelDeployment) {
 		dd.ModelVersionID = version.ID
 		dd.ModelName = version.ModelName
@@ -729,11 +795,12 @@ func (uc *DeploymentUseCase) UpgradeDeployment(ctx context.Context, id, newVersi
 		Image:        uc.deploymentImage,
 		Args:         updated.StartupArgs,
 		Labels: map[string]string{
-			"carrot.ai/deployment-id": updated.ID,
-			"carrot.ai/model-id":      version.ModelID,
-			"carrot.ai/model-version": version.Version,
-			"carrot.ai/tenant-id":     updated.TenantID,
-			"carrot.ai/managed-by":    "carrot",
+			"carrot.ai/deployment-id":       updated.ID,
+			"carrot.ai/template-generation": strconv.FormatInt(updated.Generation, 10),
+			"carrot.ai/model-id":            version.ModelID,
+			"carrot.ai/model-version":       version.Version,
+			"carrot.ai/tenant-id":           updated.TenantID,
+			"carrot.ai/managed-by":          "carrot",
 		},
 		ModelPath:      deploymentModelPath(updated),
 		ArtifactURI:    artifactURI,
@@ -821,34 +888,61 @@ func (uc *DeploymentUseCase) DeleteDeployment(ctx context.Context, id string) er
 		}
 		return errcode.Wrap(errcode.ErrInternal, "查询部署失败", err)
 	}
+	if d.Status == domain.DeploymentStatusDeleted {
+		if uc.gateway != nil {
+			return uc.gateway.UnregisterRoute(ctx, d.Name)
+		}
+		return nil
+	}
+	if d.Status == domain.DeploymentStatusScaling {
+		return errcode.New(errcode.ErrIllegalState, "扩缩容操作进行中，暂不能删除")
+	}
+	if d.Status == domain.DeploymentStatusDeleting {
+		return errcode.New(errcode.ErrIllegalState, "删除已在进行中，后台将重试")
+	}
 	// 记录删除事件（任何状态均可删除）
+	if err := uc.repo.CompareStatus(id, d.Status, domain.DeploymentStatusDeleting, d.Generation, uc.now()); err != nil {
+		return errcode.Wrap(errcode.ErrIllegalState, "部署状态已改变", err)
+	}
 	uc.recordEvent(id, d.Status, domain.DeploymentStatusDeleting, "发起删除", getRequestID(ctx), "")
-	uc.updateDeployment(id, func(dd *domain.ModelDeployment) {
-		dd.Status = domain.DeploymentStatusDeleting
-	})
+	return uc.finishDelete(ctx, d)
+}
 
+func (uc *DeploymentUseCase) finishDelete(ctx context.Context, d *domain.ModelDeployment) error {
+	id := d.ID
 	// 调 K8s 删除（幂等）
 	if err := uc.deleteK8sDeployment(ctx, d.ClusterID, d.Name, d.Namespace); err != nil {
-		uc.failDeployment(id, "删除失败: "+err.Error())
-		return errcode.Wrap(errcode.ErrInternal, "删除失败", err)
+		uc.recordEvent(id, domain.DeploymentStatusDeleting, domain.DeploymentStatusDeleting, "删除尚未确认，保留预留并等待重试", getRequestID(ctx), err.Error())
+		return errcode.Wrap(errcode.ErrInternal, "删除尚未完成，后台将重试", err)
+	}
+	if d.ClusterID != "" && uc.clusterSelector != nil {
+		if err := uc.clusterSelector.ReleaseCapacity(d.ClusterID, d.ID); err != nil {
+			return errcode.Wrap(errcode.ErrInternal, "释放集群容量失败，等待删除重试", err)
+		}
+	}
+	if uc.quota != nil {
+		if err := uc.quota.ReleaseDeployment(id, d.TenantID, d.Resource.GPUType, d.Replicas*d.Resource.GPUCount); err != nil {
+			return errcode.Wrap(errcode.ErrInternal, "释放租户配额失败，等待删除重试", err)
+		}
+	}
+	// Route removal is also retried before entering the terminal state.
+	if uc.gateway != nil {
+		if err := uc.gateway.UnregisterRoute(ctx, d.Name); err != nil {
+			return errcode.Wrap(errcode.ErrUpstream, "撤销网关路由失败，等待删除重试", err)
+		}
+	}
+	if err := uc.repo.CompareStatus(id, domain.DeploymentStatusDeleting, domain.DeploymentStatusDeleted, d.Generation, uc.now()); err != nil {
+		current, readErr := uc.repo.Get(id)
+		if readErr == nil && current.Status == domain.DeploymentStatusDeleted {
+			return nil
+		}
+		return errcode.Wrap(errcode.ErrInternal, "记录删除完成失败，等待重试", err)
 	}
 	uc.recordEvent(id, domain.DeploymentStatusDeleting, domain.DeploymentStatusDeleted, "删除完成", getRequestID(ctx), "")
-	uc.updateDeployment(id, func(dd *domain.ModelDeployment) {
-		dd.Status = domain.DeploymentStatusDeleted
-	})
-	// R2-4：释放租户配额
-	if uc.quota != nil {
-		uc.quota.Release(ctx, d.TenantID, d.Resource.GPUType, d.Replicas*d.Resource.GPUCount)
-	}
 	// R2-4：审计
 	if uc.audit != nil {
 		uc.audit.Record("deployment.delete", "console", d.TenantID, id, getRequestID(ctx),
 			"删除部署 "+d.Name+"，释放 "+itoa32(d.Replicas*d.Resource.GPUCount)+" GPU")
-	}
-	if uc.gateway != nil {
-		if err := uc.gateway.UnregisterRoute(ctx, d.Name); err != nil {
-			return errcode.Wrap(errcode.ErrUpstream, "撤销网关路由失败", err)
-		}
 	}
 	return nil
 }
@@ -856,7 +950,7 @@ func (uc *DeploymentUseCase) DeleteDeployment(ctx context.Context, id string) er
 // SyncFromK8s 从 K8s 同步部署状态（Reconciler 与提交后首次同步共用）
 func (uc *DeploymentUseCase) SyncFromK8s(ctx context.Context, id string) {
 	d, err := uc.repo.Get(id)
-	if err != nil || d.Status == domain.DeploymentStatusDeleted || d.Status == domain.DeploymentStatusDeleting {
+	if err != nil || d.Status == domain.DeploymentStatusDeleted || d.Status == domain.DeploymentStatusDeleting || d.Status == domain.DeploymentStatusScaling {
 		return
 	}
 	clusterFailure := d.Status == domain.DeploymentStatusFailed && strings.HasPrefix(d.Diagnostics, "目标集群不可用:")

@@ -77,12 +77,20 @@ func (uc *QuotaUseCase) Reserve(ctx context.Context, tenantID, gpuType string, n
 				"，配额 "+itoa32(q.Quota)+"，已用 "+itoa32(q.Used))
 	}
 	if err := uc.store.AddUsed(tenantID, gpuType, need); err != nil {
+		if err == data.ErrQuotaExceeded {
+			return errcode.New(errcode.ErrQuotaExceeded, "租户配额不足（并发预留）")
+		}
 		return errcode.Wrap(errcode.ErrInternal, "占用配额失败", err)
 	}
 	return nil
 }
 
-// Release 释放配额（删除部署时调用）
+// ReleaseDeployment uses a persistent receipt for retry-safe deletion.
+func (uc *QuotaUseCase) ReleaseDeployment(id, tenantID, gpuType string, need int32) error {
+	return uc.store.ReleaseDeployment(id, tenantID, gpuType, need)
+}
+
+// Release 归还创建/扩缩容中尚未提交的预留。
 func (uc *QuotaUseCase) Release(ctx context.Context, tenantID, gpuType string, need int32) {
 	if need <= 0 {
 		return

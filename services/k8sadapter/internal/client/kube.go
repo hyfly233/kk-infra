@@ -28,6 +28,7 @@ type DeploymentSpec struct {
 	ArtifactURI    string            `json:"artifactUri,omitempty"`
 	ArtifactDigest string            `json:"artifactDigest,omitempty"`
 	Runtime        string            `json:"runtime,omitempty"`
+	ServingMode    string            `json:"servingMode,omitempty"`
 }
 
 // DeploymentResult 创建/查询结果

@@ -1,0 +1,1 @@
+ALTER TABLE clusters ADD COLUMN IF NOT EXISTS serving_url_template TEXT NOT NULL DEFAULT '';

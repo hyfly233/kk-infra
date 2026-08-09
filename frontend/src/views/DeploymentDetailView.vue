@@ -2,9 +2,9 @@
 // 服务详情：状态/指标/事件/API 示例 + 扩容/重启/删除（管理员）
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { deleteDeployment, fetchDeployment, restartDeployment, scaleDeployment } from '../api'
+import { deleteDeployment, fetchDeployment, fetchDeploymentMetrics, restartDeployment, scaleDeployment } from '../api'
 import { useAuth } from '../composables/useAuth'
-import type { DeploymentView } from '../types'
+import type { DeploymentView, MetricsView } from '../types'
 import { fmtTime, statusBadge } from '../utils/status'
 
 const route = useRoute()
@@ -15,6 +15,7 @@ const id = route.params.id as string
 const loading = ref(true)
 const error = ref('')
 const dep = ref<DeploymentView | null>(null)
+const metrics = ref<MetricsView | null>(null)
 const actionError = ref('')
 
 // 扩容弹窗
@@ -43,8 +44,18 @@ const tabs = [
 const activeTab = ref('perf')
 interface PerfMetric { name: string; value: string }
 const perfMetrics = computed<PerfMetric[]>(() => {
-  // MVP：指标通过 observability 查询，此处展示占位（后续接真实指标）
-  return []
+  const series = metrics.value?.series ?? []
+  const latest = (name: string) => series.find((item) => item.name === name)?.points.at(-1)?.val
+  const requests = latest('requests')
+  const errorRate = latest('errorRate')
+  const ttft = latest('ttftMs')
+  const tokensPerSec = latest('tokensPerSec')
+  return [
+    requests === undefined ? null : { name: '请求数', value: requests.toFixed(0) },
+    errorRate === undefined ? null : { name: '错误率', value: `${errorRate.toFixed(2)}%` },
+    ttft === undefined ? null : { name: 'TTFT', value: `${ttft.toFixed(0)} ms` },
+    tokensPerSec === undefined ? null : { name: 'Token/s', value: tokensPerSec.toFixed(2) },
+  ].filter((item): item is PerfMetric => item !== null)
 })
 
 async function load() {
@@ -52,6 +63,11 @@ async function load() {
   error.value = ''
   try {
     dep.value = await fetchDeployment(id)
+    try {
+      metrics.value = await fetchDeploymentMetrics(id, '1h')
+    } catch {
+      metrics.value = null
+    }
   } catch (e) {
     error.value = (e as Error).message
   } finally {

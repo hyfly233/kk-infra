@@ -53,6 +53,7 @@ log "启动 controlplane :8080(storage=$STORAGE)"
 "$BIN_DIR/controlplane" --addr :8080 \
   --model-registry http://127.0.0.1:8081 \
   --k8s-adapter http://127.0.0.1:8082 \
+	--gateway-url http://127.0.0.1:8083 \
   --storage "$STORAGE" \
   --observability-url http://127.0.0.1:8084 &
 PIDS+=($!)

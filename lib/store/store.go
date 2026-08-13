@@ -20,6 +20,8 @@ func MigrateAll(db *sql.DB) error {
 	return m.Migrate(migrationsFS, []string{
 		"migrations/001_init.sql",
 		"migrations/002_api_key_models.sql",
+		"migrations/003_gateway_routes.sql",
+		"migrations/004_identity.sql",
 	})
 }
 

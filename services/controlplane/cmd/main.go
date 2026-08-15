@@ -17,6 +17,7 @@ import (
 	"kk-infra/services/controlplane/internal/biz"
 	"kk-infra/services/controlplane/internal/clients"
 	"kk-infra/services/controlplane/internal/data"
+	"kk-infra/services/controlplane/internal/identity"
 	"kk-infra/services/controlplane/internal/server"
 	"kk-infra/services/controlplane/internal/worker"
 )
@@ -25,8 +26,10 @@ func main() {
 	addr := flag.String("addr", ":8080", "监听地址")
 	modelRegistry := flag.String("model-registry", "http://127.0.0.1:8081", "modelregistry 地址")
 	k8sAdapter := flag.String("k8s-adapter", "http://127.0.0.1:8082", "k8sadapter 地址")
+	gatewayURL := flag.String("gateway-url", "http://127.0.0.1:8083", "gateway 服务地址（模型路由同步）")
 	deploymentImage := flag.String("deployment-image", "", "部署使用的模型镜像（默认 k8sadapter 决定）")
 	observabilityURL := flag.String("observability-url", "http://127.0.0.1:8084", "observability 服务地址（GPU 指标转发）")
+	authSecret := flag.String("auth-secret", os.Getenv("CARROT_AUTH_SECRET"), "JWT 签名密钥（从 CARROT_AUTH_SECRET 注入）")
 	storage := flag.String("storage", "memory", "存储后端: memory | postgres")
 	flag.Parse()
 
@@ -62,6 +65,9 @@ func main() {
 	kubeClient := clients.NewK8sAdapterClient(*k8sAdapter)
 
 	deployUse := biz.NewDeploymentUseCase(repo, modelClient, kubeClient)
+	if *gatewayURL != "" {
+		deployUse.SetGateway(clients.NewGatewayClient(*gatewayURL))
+	}
 	deployUse.SetDeploymentImage(*deploymentImage)
 	// R2-4：启用租户配额 + 审计
 	quotaUse := biz.NewQuotaUseCase(quotaStore, logger)
@@ -70,6 +76,12 @@ func main() {
 	deployUse.SetAudit(auditUse)
 	resUse := biz.NewResourceUseCase(kubeClient)
 	srv := server.NewServer(deployUse, resUse, quotaUse, auditUse, repo, logger)
+	if *authSecret != "" {
+		srv.SetIdentityService(identity.NewService(*authSecret))
+	}
+	if *observabilityURL != "" {
+		srv.SetObservabilityClient(clients.NewObservabilityClient(*observabilityURL))
+	}
 
 	// Reconciler：每 3 秒对账一次
 	reconciler := worker.NewReconciler(repo, deployUse, logger, 3*time.Second)

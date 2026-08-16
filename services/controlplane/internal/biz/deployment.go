@@ -21,19 +21,27 @@ type ModelRegistryClient interface {
 type K8sClient interface {
 	ListGPUs(ctx context.Context) ([]domain.GPUResource, error)
 	CreateDeployment(ctx context.Context, spec *clients.CreateDeploymentSpec) (*clients.K8sDeploymentResult, error)
+	UpdateDeployment(ctx context.Context, spec *clients.CreateDeploymentSpec) (*clients.K8sDeploymentResult, error)
 	GetDeployment(ctx context.Context, name, namespace string) (*clients.K8sDeploymentResult, error)
 	ListDeployments(ctx context.Context, namespace string) ([]*clients.K8sDeploymentResult, error)
 	ScaleDeployment(ctx context.Context, name, namespace string, replicas int32) (*clients.K8sDeploymentResult, error)
+	RestartDeployment(ctx context.Context, name, namespace string) (*clients.K8sDeploymentResult, error)
 	DeleteDeployment(ctx context.Context, name, namespace string) error
+}
+
+// GatewayClient 管理部署完成后的推理路由。
+type GatewayClient interface {
+	RegisterRoute(ctx context.Context, model, endpoint, tenantID, deploymentID string) error
+	UnregisterRoute(ctx context.Context, model string) error
 }
 
 // DeploymentUseCase 部署业务用例
 type DeploymentUseCase struct {
-	repo    data.DeploymentRepository
-	models  ModelRegistryClient
-	kube    K8sClient
-	sm      *domain.DeploymentStateMachine
-	now     func() time.Time
+	repo   data.DeploymentRepository
+	models ModelRegistryClient
+	kube   K8sClient
+	sm     *domain.DeploymentStateMachine
+	now    func() time.Time
 	// 默认租户（MVP 单租户）
 	defaultTenant string
 	// 部署镜像（空则使用 k8sadapter 默认；本机验证用 mock 镜像）
@@ -42,6 +50,8 @@ type DeploymentUseCase struct {
 	quota *QuotaUseCase
 	// 审计日志（R2-4，可为 nil 表示不记录）
 	audit *AuditUseCase
+	// gateway 可为 nil，供不启动推理网关的单元测试使用。
+	gateway GatewayClient
 }
 
 // NewDeploymentUseCase 创建用例
@@ -64,6 +74,11 @@ func (uc *DeploymentUseCase) SetQuota(quota *QuotaUseCase) {
 // SetAudit 启用审计日志
 func (uc *DeploymentUseCase) SetAudit(audit *AuditUseCase) {
 	uc.audit = audit
+}
+
+// SetGateway 注入网关路由客户端。
+func (uc *DeploymentUseCase) SetGateway(gateway GatewayClient) {
+	uc.gateway = gateway
 }
 
 // SetDeploymentImage 设置部署镜像（验证环境注入 mock 镜像）
@@ -383,7 +398,7 @@ func (uc *DeploymentUseCase) ScaleDeployment(ctx context.Context, id string, rep
 	return uc.repo.Get(id)
 }
 
-// RestartDeployment 重启（MVP：调 K8s 重建 Pod 简化）
+// RestartDeployment 触发 Kubernetes Deployment 的滚动重启。
 func (uc *DeploymentUseCase) RestartDeployment(ctx context.Context, id string) (*domain.ModelDeployment, error) {
 	d, err := uc.repo.Get(id)
 	if err != nil {
@@ -393,8 +408,12 @@ func (uc *DeploymentUseCase) RestartDeployment(ctx context.Context, id string) (
 		return nil, errcode.New(errcode.ErrIllegalState, "当前状态 "+d.Status+" 不允许重启")
 	}
 	uc.transition(id, d.Status, domain.DeploymentStatusRestarting, "发起重启")
-	time.Sleep(300 * time.Millisecond) // 模拟重启
-	uc.transition(id, domain.DeploymentStatusRestarting, domain.DeploymentStatusRunning, "重启完成")
+	if _, err := uc.kube.RestartDeployment(ctx, d.Name, d.Namespace); err != nil {
+		uc.failDeployment(id, "重启失败: "+err.Error())
+		return nil, errcode.Wrap(errcode.ErrInternal, "重启失败", err)
+	}
+	uc.transition(id, domain.DeploymentStatusRestarting, domain.DeploymentStatusStarting, "Kubernetes 已触发滚动重启")
+	uc.SyncFromK8s(ctx, id)
 	return uc.repo.Get(id)
 }
 
@@ -445,25 +464,29 @@ func (uc *DeploymentUseCase) UpgradeDeployment(ctx context.Context, id, newVersi
 		dd.Generation++
 	})
 
-	// 触发 K8s 滚动更新：重建 Deployment（renderer 用新版本参数）
+	updated, err := uc.repo.Get(id)
+	if err != nil {
+		return nil, errcode.Wrap(errcode.ErrInternal, "读取升级后部署失败", err)
+	}
+	// 触发 K8s 滚动更新：更新现有 Deployment 的 Pod template。
 	spec := &clients.CreateDeploymentSpec{
-		DeploymentID: d.ID,
-		Name:         d.Name,
-		Namespace:    d.Namespace,
-		Replicas:     d.Replicas,
+		DeploymentID: updated.ID,
+		Name:         updated.Name,
+		Namespace:    updated.Namespace,
+		Replicas:     updated.Replicas,
 		Resource:     domain.Resource{GPUType: version.GPUType, GPUCount: version.GPUCount, MemoryMB: version.MemoryMB},
 		Image:        uc.deploymentImage,
-		Args:         d.StartupArgs,
+		Args:         updated.StartupArgs,
 		Labels: map[string]string{
-			"carrot.ai/deployment-id": d.ID,
+			"carrot.ai/deployment-id": updated.ID,
 			"carrot.ai/model-id":      version.ModelID,
 			"carrot.ai/model-version": version.Version,
-			"carrot.ai/tenant-id":     d.TenantID,
+			"carrot.ai/tenant-id":     updated.TenantID,
 			"carrot.ai/managed-by":    "carrot",
 		},
-		ModelPath: deploymentModelPath(d),
+		ModelPath: deploymentModelPath(updated),
 	}
-	if _, err := uc.kube.CreateDeployment(ctx, spec); err != nil {
+	if _, err := uc.kube.UpdateDeployment(ctx, spec); err != nil {
 		uc.failDeployment(id, "升级失败: "+err.Error())
 		return nil, errcode.Wrap(errcode.ErrInternal, "升级失败", err)
 	}
@@ -511,6 +534,11 @@ func (uc *DeploymentUseCase) DeleteDeployment(ctx context.Context, id string) er
 		uc.audit.Record("deployment.delete", "console", d.TenantID, id, getRequestID(ctx),
 			"删除部署 "+d.Name+"，释放 "+itoa32(d.Replicas*d.Resource.GPUCount)+" GPU")
 	}
+	if uc.gateway != nil {
+		if err := uc.gateway.UnregisterRoute(ctx, d.Name); err != nil {
+			return errcode.Wrap(errcode.ErrUpstream, "撤销网关路由失败", err)
+		}
+	}
 	return nil
 }
 
@@ -532,6 +560,11 @@ func (uc *DeploymentUseCase) SyncFromK8s(ctx context.Context, id string) {
 	case "Available":
 		if uc.sm.CanTransition(d.Status, domain.DeploymentStatusRunning) {
 			uc.transition(id, d.Status, domain.DeploymentStatusRunning, "Pod 就绪")
+		}
+		if uc.gateway != nil && d.Endpoint != "" {
+			if err := uc.gateway.RegisterRoute(ctx, d.Name, d.Endpoint, d.TenantID, d.ID); err != nil {
+				uc.failDeployment(id, "注册网关路由失败: "+err.Error())
+			}
 		}
 	case "ReplicaFailure":
 		diag := res.Message

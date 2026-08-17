@@ -63,6 +63,11 @@ func (m *mockKubeClient) CreateDeployment(ctx context.Context, spec *clients.Cre
 	}, nil
 }
 
+func (m *mockKubeClient) UpdateDeployment(ctx context.Context, spec *clients.CreateDeploymentSpec) (*clients.K8sDeploymentResult, error) {
+	m.deploys[spec.Name] = spec.Replicas
+	return m.GetDeployment(ctx, spec.Name, spec.Namespace)
+}
+
 func (m *mockKubeClient) GetDeployment(ctx context.Context, name, namespace string) (*clients.K8sDeploymentResult, error) {
 	r, ok := m.deploys[name]
 	if !ok {
@@ -92,6 +97,10 @@ func (m *mockKubeClient) ScaleDeployment(ctx context.Context, name, namespace st
 		DeploymentID: name,
 		Status:       &clients.K8sDeploymentStatus{Replicas: replicas, ReadyReplicas: replicas, Condition: "Available"},
 	}, nil
+}
+
+func (m *mockKubeClient) RestartDeployment(ctx context.Context, name, namespace string) (*clients.K8sDeploymentResult, error) {
+	return m.GetDeployment(ctx, name, namespace)
 }
 
 func (m *mockKubeClient) DeleteDeployment(ctx context.Context, name, namespace string) error {

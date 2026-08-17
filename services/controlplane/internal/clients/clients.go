@@ -107,6 +107,31 @@ func (c *ObservabilityClient) DeploymentMetrics(ctx context.Context, deploymentI
 	return &v, nil
 }
 
+// ---- gateway 客户端 ----
+
+// GatewayClient 管理模型到服务端点的内部路由。
+type GatewayClient struct {
+	*HTTPClient
+}
+
+// NewGatewayClient 创建 gateway 客户端。
+func NewGatewayClient(baseURL string) *GatewayClient {
+	return &GatewayClient{NewHTTPClient(baseURL)}
+}
+
+// RegisterRoute 注册或更新可调用模型路由。
+func (c *GatewayClient) RegisterRoute(ctx context.Context, model, endpoint, tenantID, deploymentID string) error {
+	body := map[string]string{
+		"model": model, "endpoint": endpoint, "tenantId": tenantID, "deploymentId": deploymentID,
+	}
+	return c.do(ctx, http.MethodPost, "/internal/routes", body, nil)
+}
+
+// UnregisterRoute 删除模型路由。
+func (c *GatewayClient) UnregisterRoute(ctx context.Context, model string) error {
+	return c.do(ctx, http.MethodDelete, "/internal/routes/"+model, nil, nil)
+}
+
 // ---- modelregistry 客户端 ----
 
 // ModelRegistryClient 模型注册中心客户端
@@ -165,11 +190,11 @@ type K8sDeploymentStatus struct {
 
 // K8sDeploymentResult 部署查询结果
 type K8sDeploymentResult struct {
-	DeploymentID string               `json:"deploymentId"`
-	Name         string               `json:"name"` // 部署名（k8sadapter 返回，R2-2 孤儿检测用）
-	Status       *K8sDeploymentStatus `json:"status"`
-	Endpoint     string               `json:"endpoint"`
-	Message      string               `json:"message"`
+	DeploymentID string                   `json:"deploymentId"`
+	Name         string                   `json:"name"` // 部署名（k8sadapter 返回，R2-2 孤儿检测用）
+	Status       *K8sDeploymentStatus     `json:"status"`
+	Endpoint     string                   `json:"endpoint"`
+	Message      string                   `json:"message"`
 	Pods         []map[string]interface{} `json:"pods"`
 	Events       []map[string]interface{} `json:"events"`
 }
@@ -187,6 +212,15 @@ func (c *K8sAdapterClient) ListGPUs(ctx context.Context) ([]domain.GPUResource, 
 func (c *K8sAdapterClient) CreateDeployment(ctx context.Context, spec *CreateDeploymentSpec) (*K8sDeploymentResult, error) {
 	var res K8sDeploymentResult
 	if err := c.do(ctx, http.MethodPost, "/v1/deployments", spec, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+// UpdateDeployment 更新既有 Kubernetes Deployment。
+func (c *K8sAdapterClient) UpdateDeployment(ctx context.Context, spec *CreateDeploymentSpec) (*K8sDeploymentResult, error) {
+	var res K8sDeploymentResult
+	if err := c.do(ctx, http.MethodPut, "/v1/deployments/"+spec.Name, spec, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil
@@ -215,6 +249,15 @@ func (c *K8sAdapterClient) ScaleDeployment(ctx context.Context, name, namespace 
 	var res K8sDeploymentResult
 	body := map[string]int32{"replicas": replicas}
 	if err := c.do(ctx, http.MethodPost, "/v1/deployments/"+name+"/scale?namespace="+namespace, body, &res); err != nil {
+		return nil, err
+	}
+	return &res, nil
+}
+
+// RestartDeployment 触发 Kubernetes Deployment 滚动重启。
+func (c *K8sAdapterClient) RestartDeployment(ctx context.Context, name, namespace string) (*K8sDeploymentResult, error) {
+	var res K8sDeploymentResult
+	if err := c.do(ctx, http.MethodPost, "/v1/deployments/"+name+"/restart?namespace="+namespace, nil, &res); err != nil {
 		return nil, err
 	}
 	return &res, nil

@@ -15,6 +15,7 @@ import (
 	"kk-infra/services/controlplane/internal/biz"
 	"kk-infra/services/controlplane/internal/clients"
 	"kk-infra/services/controlplane/internal/data"
+	"kk-infra/services/controlplane/internal/identity"
 )
 
 // Server 控制面 HTTP 服务
@@ -26,6 +27,7 @@ type Server struct {
 	repo          data.DeploymentRepository
 	logger        *slog.Logger
 	observability *clients.ObservabilityClient // 可为 nil（未配置时返回占位）
+	identity      *identity.Service
 }
 
 // NewServer 创建服务
@@ -38,9 +40,14 @@ func (s *Server) SetObservabilityClient(c *clients.ObservabilityClient) {
 	s.observability = c
 }
 
+func (s *Server) SetIdentityService(service *identity.Service) { s.identity = service }
+
 // Handler 路由
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/auth/login", s.handleLogin)
+	mux.HandleFunc("POST /api/v1/auth/refresh", s.handleRefresh)
+	mux.HandleFunc("POST /api/v1/auth/logout", s.handleLogout)
 
 	// 部署
 	mux.HandleFunc("POST /api/v1/deployments", s.handleCreateDeployment)
@@ -67,6 +74,54 @@ func (s *Server) Handler() http.Handler {
 			middleware.AccessLog(s.logger, mux),
 		),
 	)
+}
+
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if s.identity == nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrIllegalState, "身份服务未配置"))
+		return
+	}
+	var req struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+		TenantID string `json:"tenantId"`
+	}
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, "请求体解析失败"))
+		return
+	}
+	session, err := s.identity.Login(req.Email, req.Password, req.TenantID)
+	if err != nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "用户名、密码或租户无效"))
+		return
+	}
+	apitypes.WriteResult(w, r, session, nil)
+}
+func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		RefreshToken string `json:"refreshToken"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	if s.identity == nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrIllegalState, "身份服务未配置"))
+		return
+	}
+	session, err := s.identity.Refresh(req.RefreshToken)
+	if err != nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "refresh token 无效"))
+		return
+	}
+	apitypes.WriteResult(w, r, session, nil)
+}
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		RefreshToken string `json:"refreshToken"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	if s.identity != nil {
+		s.identity.Logout(req.RefreshToken)
+	}
+	apitypes.WriteResult(w, r, map[string]bool{"loggedOut": true}, nil)
 }
 
 // ---- 部署 ----

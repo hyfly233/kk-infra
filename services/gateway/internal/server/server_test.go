@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -74,12 +75,14 @@ func newTestGateway(t *testing.T) (http.Handler, *mockMetrics, *router.Table, *a
 
 func setupRouteAndKey(t *testing.T, routes *router.Table, keys *auth.Manager, upstreamURL string) (string, string) {
 	t.Helper()
-	routes.Register(&router.Route{
+	if err := routes.Register(context.Background(), &router.Route{
 		Model:        "qwen-demo",
 		Endpoint:     upstreamURL,
 		TenantID:     "default",
 		DeploymentID: "deploy-001",
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	res, err := keys.Issue("default")
 	if err != nil {
 		t.Fatalf("创建 Key 失败: %v", err)
@@ -223,11 +226,13 @@ func TestTenantIsolation(t *testing.T) {
 	defer upstream.Close()
 
 	h, _, routes, keys := newTestGateway(t)
-	routes.Register(&router.Route{
+	if err := routes.Register(context.Background(), &router.Route{
 		Model:    "qwen-demo",
 		Endpoint: upstream.URL,
 		TenantID: "tenant-a",
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	res, _ := keys.Issue("tenant-b") // 不同租户
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"qwen-demo"}`))
 	req.Header.Set("Authorization", "Bearer "+res.Key)
@@ -241,7 +246,9 @@ func TestTenantIsolation(t *testing.T) {
 // /v1/models 列表
 func TestListModels(t *testing.T) {
 	h, _, routes, keys := newTestGateway(t)
-	routes.Register(&router.Route{Model: "qwen-demo", Endpoint: "http://127.0.0.1:1", TenantID: "default"})
+	if err := routes.Register(context.Background(), &router.Route{Model: "qwen-demo", Endpoint: "http://127.0.0.1:1", TenantID: "default"}); err != nil {
+		t.Fatal(err)
+	}
 	res, _ := keys.Issue("default")
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer "+res.Key)

@@ -89,9 +89,9 @@ func (s *Server) handleListModels(w http.ResponseWriter, r *http.Request) {
 	data := make([]map[string]interface{}, 0, len(routes))
 	for _, rt := range routes {
 		data = append(data, map[string]interface{}{
-			"id":      rt.Model,
-			"object":  "model",
-			"created": time.Now().Unix(),
+			"id":       rt.Model,
+			"object":   "model",
+			"created":  time.Now().Unix(),
 			"owned_by": rt.TenantID,
 		})
 	}
@@ -119,18 +119,24 @@ func (s *Server) handleRegisterRoute(w http.ResponseWriter, r *http.Request) {
 		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, "model 与 endpoint 必填"))
 		return
 	}
-	s.routes.Register(&router.Route{
+	if err := s.routes.Register(r.Context(), &router.Route{
 		Model:        req.Model,
 		Endpoint:     req.Endpoint,
 		TenantID:     req.TenantID,
 		DeploymentID: req.DeploymentID,
-	})
+	}); err != nil {
+		apitypes.WriteResult(w, r, nil, errcode.Wrap(errcode.ErrInternal, "保存网关路由失败", err))
+		return
+	}
 	s.logger.Info("注册模型路由", "model", req.Model, "endpoint", req.Endpoint)
 	apitypes.WriteResult(w, r, map[string]bool{"registered": true}, nil)
 }
 
 func (s *Server) handleUnregisterRoute(w http.ResponseWriter, r *http.Request) {
-	s.routes.Unregister(r.PathValue("model"))
+	if err := s.routes.Unregister(r.Context(), r.PathValue("model")); err != nil {
+		apitypes.WriteResult(w, r, nil, errcode.Wrap(errcode.ErrInternal, "删除网关路由失败", err))
+		return
+	}
 	apitypes.WriteResult(w, r, map[string]bool{"unregistered": true}, nil)
 }
 

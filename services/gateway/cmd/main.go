@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -32,9 +33,13 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	logger.Info("gateway 启动", "addr", *addr, "storage", *storage)
 
-	var keys *auth.Manager
+	var (
+		keys *auth.Manager
+		db   *sql.DB
+	)
 	if *storage == "postgres" {
-		db, err := store.Open(store.DefaultConfig())
+		var err error
+		db, err = store.Open(store.DefaultConfig())
 		if err != nil {
 			logger.Error("连接 Postgres 失败", "err", err)
 			os.Exit(1)
@@ -51,6 +56,15 @@ func main() {
 	}
 
 	routes := router.NewTable()
+	if *storage == "postgres" {
+		var err error
+		routes, err = router.NewTableWithStore(context.Background(), router.NewPostgresStore(db))
+		if err != nil {
+			logger.Error("恢复网关路由失败", "err", err)
+			os.Exit(1)
+		}
+		logger.Info("已恢复网关路由", "count", len(routes.List()))
+	}
 	var metricsSink proxy.MetricsSink
 	if *observabilityURL != "" {
 		metricsSink = sink.NewHTTPSink(*observabilityURL, logger)

@@ -22,15 +22,15 @@ type DeploymentSpec struct {
 	Resource     domain.Resource   `json:"resource"`
 	Image        string            `json:"image"`
 	Args         []string          `json:"args"`
-	Labels       map[string]string `json:"labels"`       // carrot.ai/* 标签
-	Env          map[string]string `json:"env"`          // 注入环境变量
-	ModelPath    string            `json:"modelPath"`    // 模型权重挂载路径
+	Labels       map[string]string `json:"labels"`    // carrot.ai/* 标签
+	Env          map[string]string `json:"env"`       // 注入环境变量
+	ModelPath    string            `json:"modelPath"` // 模型权重挂载路径
 }
 
 // DeploymentResult 创建/查询结果
 type DeploymentResult struct {
-	DeploymentID string               `json:"deploymentId"`
-	Name         string               `json:"name"` // 部署名（R2-2 孤儿检测用）
+	DeploymentID string                `json:"deploymentId"`
+	Name         string                `json:"name"` // 部署名（R2-2 孤儿检测用）
 	Status       *k8s.DeploymentStatus `json:"status"`
 	Pods         []k8s.Pod             `json:"pods"`
 	Events       []k8s.Event           `json:"events"`
@@ -44,12 +44,16 @@ type KubeClient interface {
 	ListGPUNodes(ctx context.Context) ([]domain.GPUResource, error)
 	// CreateDeployment 幂等创建 Deployment + Service
 	CreateDeployment(ctx context.Context, spec *DeploymentSpec) (*DeploymentResult, error)
+	// UpdateDeployment 将现有 Deployment 的模板与资源规格更新为期望值。
+	UpdateDeployment(ctx context.Context, spec *DeploymentSpec) (*DeploymentResult, error)
 	// GetDeployment 查询部署状态（含 Pod/事件）
 	GetDeployment(ctx context.Context, name, namespace string) (*DeploymentResult, error)
 	// ListDeployments 按 owner label 扫描全部受管部署（R2-2：重启对账/孤儿回收）
 	ListDeployments(ctx context.Context, namespace string) ([]*DeploymentResult, error)
 	// ScaleDeployment 调整副本数
 	ScaleDeployment(ctx context.Context, name, namespace string, replicas int32) (*DeploymentResult, error)
+	// RestartDeployment 通过更新 Pod template annotation 触发 Kubernetes 滚动重启。
+	RestartDeployment(ctx context.Context, name, namespace string) (*DeploymentResult, error)
 	// DeleteDeployment 幂等删除（资源不存在返回成功）
 	DeleteDeployment(ctx context.Context, name, namespace string) error
 	// NodeGPUCapacity 查询指定 GPU 类型的全局可用数（供配额校验）

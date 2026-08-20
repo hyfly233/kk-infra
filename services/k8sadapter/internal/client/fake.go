@@ -44,10 +44,10 @@ type FakeDeployment struct {
 // 部署生命周期：创建 → Pending(1s) → Starting(2s) → Running。
 // 扩缩容：更新副本数后 Ready 逐步收敛。删除：幂等。
 type FakeKubeClient struct {
-	mu       sync.RWMutex
-	nodes    []FakeNodeConfig
-	deploys  map[string]*FakeDeployment // key: namespace/name
-	startLatency time.Duration // 每阶段推进延迟
+	mu           sync.RWMutex
+	nodes        []FakeNodeConfig
+	deploys      map[string]*FakeDeployment // key: namespace/name
+	startLatency time.Duration              // 每阶段推进延迟
 }
 
 // NewFakeKubeClient 创建 Fake 客户端
@@ -129,6 +129,24 @@ func (f *FakeKubeClient) CreateDeployment(ctx context.Context, spec *DeploymentS
 
 	// 异步推进：Pending → Starting → Running
 	go f.advance(k)
+	return f.GetDeployment(ctx, spec.Name, spec.Namespace)
+}
+
+// UpdateDeployment 替换 Fake 部署规格并重新推进就绪状态，模拟滚动更新。
+func (f *FakeKubeClient) UpdateDeployment(ctx context.Context, spec *DeploymentSpec) (*DeploymentResult, error) {
+	f.mu.Lock()
+	d, ok := f.deploys[key(spec.Name, spec.Namespace)]
+	if !ok {
+		f.mu.Unlock()
+		return nil, ErrNotFound
+	}
+	d.Spec = *spec
+	d.Stage = 0
+	d.Ready = 0
+	d.Message = "正在滚动更新"
+	f.mu.Unlock()
+
+	go f.advance(key(spec.Name, spec.Namespace))
 	return f.GetDeployment(ctx, spec.Name, spec.Namespace)
 }
 
@@ -297,6 +315,23 @@ func (f *FakeKubeClient) ScaleDeployment(ctx context.Context, name, namespace st
 		d.Ready = replicas
 	}
 	f.mu.Unlock()
+	return f.GetDeployment(ctx, name, namespace)
+}
+
+// RestartDeployment 重新推进 Pod 生命周期，模拟 Kubernetes 滚动重启。
+func (f *FakeKubeClient) RestartDeployment(ctx context.Context, name, namespace string) (*DeploymentResult, error) {
+	f.mu.Lock()
+	d, ok := f.deploys[key(name, namespace)]
+	if !ok {
+		f.mu.Unlock()
+		return nil, ErrNotFound
+	}
+	d.Stage = 0
+	d.Ready = 0
+	d.Message = "正在重启"
+	f.mu.Unlock()
+
+	go f.advance(key(name, namespace))
 	return f.GetDeployment(ctx, name, namespace)
 }
 

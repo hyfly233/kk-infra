@@ -77,10 +77,55 @@ func TestFakeDeploymentLifecycle(t *testing.T) {
 		t.Errorf("Ready 副本 = %d, want 1", res.Status.ReadyReplicas)
 	}
 
+	// 更新必须替换既有规格，而不是命中幂等创建后直接返回旧对象。
+	updated := *spec
+	updated.Replicas = 2
+	updated.Resource.GPUCount = 2
+	updated.Args = []string{"--max-model-len", "4096"}
+	res, err = f.UpdateDeployment(context.Background(), &updated)
+	if err != nil {
+		t.Fatalf("更新失败: %v", err)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		res, _ = f.GetDeployment(context.Background(), "qwen-demo", "tenant-default")
+		if res.Status != nil && res.Status.Condition == "Available" && res.Status.ReadyReplicas == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("更新后未重新就绪: %+v", res.Status)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	_, _, usedAfterUpdate, _ := f.NodeGPUCapacity(context.Background(), "A100")
+	if usedAfterUpdate != 4 {
+		t.Errorf("更新后 GPU used = %d, want 4", usedAfterUpdate)
+	}
+
+	// 重启必须使副本重新经历就绪过程。
+	res, err = f.RestartDeployment(context.Background(), "qwen-demo", "tenant-default")
+	if err != nil {
+		t.Fatalf("重启失败: %v", err)
+	}
+	if res.Status.ReadyReplicas != 0 {
+		t.Fatalf("重启应先清空 ready 副本: %+v", res.Status)
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		res, _ = f.GetDeployment(context.Background(), "qwen-demo", "tenant-default")
+		if res.Status != nil && res.Status.Condition == "Available" && res.Status.ReadyReplicas == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("重启后未重新就绪: %+v", res.Status)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
 	// GPU 占用
 	_, _, used, _ := f.NodeGPUCapacity(context.Background(), "A100")
-	if used != 1 {
-		t.Errorf("创建后 GPU used = %d, want 1", used)
+	if used != 4 {
+		t.Errorf("更新后 GPU used = %d, want 4", used)
 	}
 
 	// 扩容

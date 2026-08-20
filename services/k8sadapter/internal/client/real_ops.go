@@ -111,8 +111,8 @@ func (c *RealKubeClient) NodeGPUCapacity(ctx context.Context, gpuType string) (t
 type deploymentList struct {
 	Items []struct {
 		Metadata struct {
-			Name        string            `json:"name"`
-			Labels      map[string]string `json:"labels"`
+			Name   string            `json:"name"`
+			Labels map[string]string `json:"labels"`
 		} `json:"metadata"`
 		Spec struct {
 			Replicas int32 `json:"replicas"`
@@ -165,6 +165,33 @@ func (c *RealKubeClient) CreateDeployment(ctx context.Context, spec *DeploymentS
 	// 创建 Service（幂等：已存在则忽略）
 	_ = c.do(ctx, "POST", "/api/v1/namespaces/"+ns+"/services", res.Service, nil)
 
+	return c.GetDeployment(ctx, spec.Name, ns)
+}
+
+// UpdateDeployment 更新现有 Deployment 的 Pod template；Service 保持不变。
+func (c *RealKubeClient) UpdateDeployment(ctx context.Context, spec *DeploymentSpec) (*DeploymentResult, error) {
+	ns := spec.Namespace
+	if ns == "" {
+		ns = c.namespace
+	}
+	image := spec.Image
+	if image == "" {
+		image = c.deployImage
+	}
+	if image == "" {
+		image = "vllm/vllm-openai:latest"
+	}
+	res, err := renderDeploymentManifests(spec, ns, image, len(c.virtualGPUs) == 0)
+	if err != nil {
+		return nil, err
+	}
+	patch := map[string]interface{}{
+		"metadata": map[string]interface{}{"labels": res.Deployment.Metadata.Labels},
+		"spec":     res.Deployment.Spec,
+	}
+	if err := c.do(ctx, "PATCH", "/apis/apps/v1/namespaces/"+ns+"/deployments/"+spec.Name, patch, nil); err != nil {
+		return nil, fmt.Errorf("更新 Deployment 失败: %w", err)
+	}
 	return c.GetDeployment(ctx, spec.Name, ns)
 }
 
@@ -276,6 +303,27 @@ func (c *RealKubeClient) ScaleDeployment(ctx context.Context, name, namespace st
 	return c.GetDeployment(ctx, name, ns)
 }
 
+// RestartDeployment 通过修改 Pod template annotation 触发 Deployment 滚动重启。
+func (c *RealKubeClient) RestartDeployment(ctx context.Context, name, namespace string) (*DeploymentResult, error) {
+	ns := namespace
+	if ns == "" {
+		ns = c.namespace
+	}
+	patch := map[string]interface{}{
+		"spec": map[string]interface{}{
+			"template": map[string]interface{}{
+				"metadata": map[string]interface{}{
+					"annotations": map[string]string{"carrot.ai/restarted-at": time.Now().UTC().Format(time.RFC3339Nano)},
+				},
+			},
+		},
+	}
+	if err := c.do(ctx, "PATCH", "/apis/apps/v1/namespaces/"+ns+"/deployments/"+name, patch, nil); err != nil {
+		return nil, fmt.Errorf("重启 Deployment 失败: %w", err)
+	}
+	return c.GetDeployment(ctx, name, ns)
+}
+
 // DeleteDeployment 幂等删除 Deployment + Service
 func (c *RealKubeClient) DeleteDeployment(ctx context.Context, name, namespace string) error {
 	ns := namespace
@@ -337,9 +385,9 @@ func (c *RealKubeClient) listPods(ctx context.Context, ns, selector string) ([]k
 func (c *RealKubeClient) listEvents(ctx context.Context, ns, name string) ([]k8s.Event, error) {
 	var list struct {
 		Items []struct {
-			Type      string `json:"type"`
-			Reason    string `json:"reason"`
-			Message   string `json:"message"`
+			Type          string `json:"type"`
+			Reason        string `json:"reason"`
+			Message       string `json:"message"`
 			LastTimestamp string `json:"lastTimestamp"`
 		} `json:"items"`
 	}
@@ -428,9 +476,9 @@ func renderDeploymentManifests(spec *DeploymentSpec, ns, image string, gpuEnable
 								Requests: resRequests,
 							},
 							ReadinessProbe: &k8s.Probe{
-								HTTPGet:    &k8s.HTTPGetAction{Path: "/health", Port: 8000},
+								HTTPGet:             &k8s.HTTPGetAction{Path: "/health", Port: 8000},
 								InitialDelaySeconds: 5,
-								PeriodSeconds:      5,
+								PeriodSeconds:       5,
 							},
 						},
 					},

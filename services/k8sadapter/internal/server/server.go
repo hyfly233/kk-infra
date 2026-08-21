@@ -32,9 +32,11 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/resources/gpus", s.handleListGPUs)
 	mux.HandleFunc("POST /v1/deployments", s.handleCreateDeployment)
+	mux.HandleFunc("PUT /v1/deployments/{name}", s.handleUpdateDeployment)
 	mux.HandleFunc("GET /v1/deployments/{name}", s.handleGetDeployment)
 	mux.HandleFunc("GET /v1/deployments", s.handleListDeployments)
 	mux.HandleFunc("POST /v1/deployments/{name}/scale", s.handleScaleDeployment)
+	mux.HandleFunc("POST /v1/deployments/{name}/restart", s.handleRestartDeployment)
 	mux.HandleFunc("DELETE /v1/deployments/{name}", s.handleDeleteDeployment)
 	return middleware.WithRequestID(
 		middleware.Recover(s.logger,
@@ -71,6 +73,31 @@ func (s *Server) handleCreateDeployment(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		s.logger.Error("创建部署失败", "err", err, "name", spec.Name, "ns", spec.Namespace)
 		apitypes.WriteResult(w, r, nil, errcode.Wrap(errcode.ErrInternal, "创建部署失败: "+err.Error(), err))
+		return
+	}
+	apitypes.WriteResult(w, r, res, nil)
+}
+
+func (s *Server) handleUpdateDeployment(w http.ResponseWriter, r *http.Request) {
+	var spec client.DeploymentSpec
+	if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, "请求体解析失败: "+err.Error()))
+		return
+	}
+	if spec.Name != "" && spec.Name != r.PathValue("name") {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, "路径与部署名称不一致"))
+		return
+	}
+	spec.Name = r.PathValue("name")
+	ctx, cancel := s.reqCtx(r)
+	defer cancel()
+	res, err := s.kube.UpdateDeployment(ctx, &spec)
+	if err != nil {
+		if err == client.ErrNotFound {
+			apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrNotFound, "部署不存在"))
+			return
+		}
+		apitypes.WriteResult(w, r, nil, errcode.Wrap(errcode.ErrInternal, "更新部署失败", err))
 		return
 	}
 	apitypes.WriteResult(w, r, res, nil)
@@ -131,6 +158,25 @@ func (s *Server) handleScaleDeployment(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		apitypes.WriteResult(w, r, nil, errcode.Wrap(errcode.ErrInternal, "扩缩容失败", err))
+		return
+	}
+	apitypes.WriteResult(w, r, res, nil)
+}
+
+func (s *Server) handleRestartDeployment(w http.ResponseWriter, r *http.Request) {
+	ns := r.URL.Query().Get("namespace")
+	if ns == "" {
+		ns = "default"
+	}
+	ctx, cancel := s.reqCtx(r)
+	defer cancel()
+	res, err := s.kube.RestartDeployment(ctx, r.PathValue("name"), ns)
+	if err != nil {
+		if err == client.ErrNotFound {
+			apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrNotFound, "部署不存在"))
+			return
+		}
+		apitypes.WriteResult(w, r, nil, errcode.Wrap(errcode.ErrInternal, "重启部署失败", err))
 		return
 	}
 	apitypes.WriteResult(w, r, res, nil)

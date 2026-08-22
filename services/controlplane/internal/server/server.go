@@ -2,13 +2,16 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"kk-infra/lib/apitypes"
+	platformauth "kk-infra/lib/auth"
 	"kk-infra/lib/domain"
 	"kk-infra/lib/errcode"
 	"kk-infra/lib/middleware"
@@ -46,8 +49,12 @@ func (s *Server) SetIdentityService(service *identity.Service) { s.identity = se
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/auth/login", s.handleLogin)
+	mux.HandleFunc("POST /api/v1/auth/bootstrap", s.handleBootstrap)
 	mux.HandleFunc("POST /api/v1/auth/refresh", s.handleRefresh)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.handleLogout)
+	mux.HandleFunc("POST /api/v1/users", s.handleCreateUser)
+	mux.HandleFunc("GET /api/v1/tenants/{tenantId}/members", s.handleListMembers)
+	mux.HandleFunc("PUT /api/v1/tenants/{tenantId}/members/{userId}", s.handleSetMember)
 
 	// 部署
 	mux.HandleFunc("POST /api/v1/deployments", s.handleCreateDeployment)
@@ -69,11 +76,74 @@ func (s *Server) Handler() http.Handler {
 	// 审计日志（R2-4）
 	mux.HandleFunc("GET /api/v1/audit", s.handleListAudit)
 
+	base := http.Handler(mux)
+	if s.identity != nil {
+		base = s.authRequired(base)
+	}
 	return middleware.WithRequestID(
 		middleware.Recover(s.logger,
-			middleware.AccessLog(s.logger, mux),
+			middleware.AccessLog(s.logger, base),
 		),
 	)
+}
+
+type claimsContextKey struct{}
+
+func claimsFrom(ctx context.Context) *platformauth.Claims {
+	claims, _ := ctx.Value(claimsContextKey{}).(*platformauth.Claims)
+	return claims
+}
+
+func canAccessTenant(ctx context.Context, tenantID string) bool {
+	claims := claimsFrom(ctx)
+	return claims == nil || claims.Role == platformauth.RolePlatformAdmin || claims.TenantID == tenantID
+}
+
+func (s *Server) authRequired(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v1/auth/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		authz := r.Header.Get("Authorization")
+		if !strings.HasPrefix(authz, "Bearer ") {
+			apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "缺少 Bearer Token"))
+			return
+		}
+		claims, err := s.identity.Authenticate(strings.TrimPrefix(authz, "Bearer "))
+		if err != nil {
+			apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "access token 无效"))
+			return
+		}
+		if r.Method != http.MethodGet && claims.Role == platformauth.RoleViewer {
+			apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "只读角色不能修改资源"))
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), claimsContextKey{}, claims)))
+	})
+}
+
+func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
+	if s.identity == nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrIllegalState, "身份服务未配置"))
+		return
+	}
+	var req struct {
+		ID       string `json:"id"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
+		TenantID string `json:"tenantId"`
+	}
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, "请求体解析失败"))
+		return
+	}
+	u, err := s.identity.Bootstrap(req.ID, req.Email, req.Password, req.TenantID)
+	if err != nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrConflict, "初始化管理员失败"))
+		return
+	}
+	apitypes.WriteResult(w, r, map[string]string{"id": u.ID, "email": u.Email}, nil)
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -124,6 +194,67 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	apitypes.WriteResult(w, r, map[string]bool{"loggedOut": true}, nil)
 }
 
+func (s *Server) requireTenantAdmin(w http.ResponseWriter, r *http.Request, tenantID string) bool {
+	claims := claimsFrom(r.Context())
+	if claims == nil || (claims.Role != platformauth.RolePlatformAdmin && (claims.Role != platformauth.RoleTenantAdmin || claims.TenantID != tenantID)) {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "需要租户管理员权限"))
+		return false
+	}
+	return true
+}
+
+func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
+	if s.identity == nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrIllegalState, "身份服务未配置"))
+		return
+	}
+	claims := claimsFrom(r.Context())
+	if claims == nil || claims.Role != platformauth.RolePlatformAdmin {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "需要平台管理员权限"))
+		return
+	}
+	var req struct {
+		ID       string `json:"id"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, "请求体解析失败"))
+		return
+	}
+	u, err := s.identity.CreateUser(req.ID, req.Email, req.Password)
+	if err != nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrConflict, "创建用户失败"))
+		return
+	}
+	apitypes.WriteResult(w, r, map[string]string{"id": u.ID, "email": u.Email}, nil)
+}
+func (s *Server) handleListMembers(w http.ResponseWriter, r *http.Request) {
+	tenantID := r.PathValue("tenantId")
+	if !s.requireTenantAdmin(w, r, tenantID) {
+		return
+	}
+	apitypes.WriteResult(w, r, s.identity.Members(tenantID), nil)
+}
+func (s *Server) handleSetMember(w http.ResponseWriter, r *http.Request) {
+	tenantID := r.PathValue("tenantId")
+	if !s.requireTenantAdmin(w, r, tenantID) {
+		return
+	}
+	var req struct {
+		Role platformauth.Role `json:"role"`
+	}
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, "请求体解析失败"))
+		return
+	}
+	if err := s.identity.SetMember(r.PathValue("userId"), tenantID, req.Role); err != nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, "设置成员失败"))
+		return
+	}
+	apitypes.WriteResult(w, r, map[string]bool{"updated": true}, nil)
+}
+
 // ---- 部署 ----
 
 func (s *Server) handleCreateDeployment(w http.ResponseWriter, r *http.Request) {
@@ -131,6 +262,10 @@ func (s *Server) handleCreateDeployment(w http.ResponseWriter, r *http.Request) 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, "请求体解析失败: "+err.Error()))
 		return
+	}
+	if claims := claimsFrom(r.Context()); claims != nil && claims.Role != platformauth.RolePlatformAdmin {
+		req.TenantID = claims.TenantID
+		req.Namespace = ""
 	}
 	d, err := s.deployments.CreateDeployment(r.Context(), &req)
 	if err != nil {
@@ -142,6 +277,9 @@ func (s *Server) handleCreateDeployment(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleListDeployments(w http.ResponseWriter, r *http.Request) {
 	tenant := r.URL.Query().Get("tenant")
+	if claims := claimsFrom(r.Context()); claims != nil && claims.Role != platformauth.RolePlatformAdmin {
+		tenant = claims.TenantID
+	}
 	list, err := s.deployments.ListDeployments(tenant)
 	if err != nil {
 		apitypes.WriteResult(w, r, nil, err)
@@ -152,6 +290,10 @@ func (s *Server) handleListDeployments(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetDeployment(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	if d, err := s.deployments.GetDeployment(id); err != nil || !canAccessTenant(r.Context(), d.TenantID) {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrNotFound, "部署不存在"))
+		return
+	}
 	d, podStatus, err := s.deployments.GetDeploymentWithK8sStatus(r.Context(), id)
 	if err != nil {
 		apitypes.WriteResult(w, r, nil, err)
@@ -180,6 +322,10 @@ func (s *Server) handleScaleDeployment(w http.ResponseWriter, r *http.Request) {
 		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, "请求体解析失败: "+err.Error()))
 		return
 	}
+	if d, err := s.deployments.GetDeployment(r.PathValue("id")); err != nil || !canAccessTenant(r.Context(), d.TenantID) {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrNotFound, "部署不存在"))
+		return
+	}
 	d, err := s.deployments.ScaleDeployment(r.Context(), r.PathValue("id"), req.Replicas)
 	if err != nil {
 		apitypes.WriteResult(w, r, nil, err)
@@ -189,6 +335,10 @@ func (s *Server) handleScaleDeployment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRestartDeployment(w http.ResponseWriter, r *http.Request) {
+	if d, err := s.deployments.GetDeployment(r.PathValue("id")); err != nil || !canAccessTenant(r.Context(), d.TenantID) {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrNotFound, "部署不存在"))
+		return
+	}
 	d, err := s.deployments.RestartDeployment(r.Context(), r.PathValue("id"))
 	if err != nil {
 		apitypes.WriteResult(w, r, nil, err)
@@ -200,6 +350,10 @@ func (s *Server) handleRestartDeployment(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleUpgradeDeployment(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ModelVersionID string `json:"modelVersionId"`
+	}
+	if d, err := s.deployments.GetDeployment(r.PathValue("id")); err != nil || !canAccessTenant(r.Context(), d.TenantID) {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrNotFound, "部署不存在"))
+		return
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ModelVersionID == "" {
 		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, "modelVersionId 必填"))
@@ -214,6 +368,10 @@ func (s *Server) handleUpgradeDeployment(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleDeleteDeployment(w http.ResponseWriter, r *http.Request) {
+	if d, err := s.deployments.GetDeployment(r.PathValue("id")); err == nil && !canAccessTenant(r.Context(), d.TenantID) {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrNotFound, "部署不存在"))
+		return
+	}
 	if err := s.deployments.DeleteDeployment(r.Context(), r.PathValue("id")); err != nil {
 		apitypes.WriteResult(w, r, nil, err)
 		return

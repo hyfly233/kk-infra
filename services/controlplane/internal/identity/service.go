@@ -2,6 +2,7 @@
 package identity
 
 import (
+	"database/sql"
 	"fmt"
 	"sync"
 	"time"
@@ -40,10 +41,130 @@ type Service struct {
 	refresh map[string]*RefreshToken
 	secret  string
 	now     func() time.Time
+	db      *sql.DB
 }
 
 func NewService(secret string) *Service {
 	return &Service{users: map[string]*User{}, byEmail: map[string]string{}, members: map[string]Member{}, refresh: map[string]*RefreshToken{}, secret: secret, now: time.Now}
+}
+
+// NewPostgresService 启动时恢复用户和租户成员；refresh token 在请求时再验证数据库状态。
+func NewPostgresService(db *sql.DB, secret string) (*Service, error) {
+	s := NewService(secret)
+	s.db = db
+	rows, err := db.Query(`SELECT id, email, password_hash, disabled FROM users`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		u := &User{}
+		if err := rows.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.Disabled); err != nil {
+			return nil, err
+		}
+		s.users[u.ID] = u
+		s.byEmail[u.Email] = u.ID
+	}
+	members, err := db.Query(`SELECT tenant_id, user_id, role FROM tenant_members`)
+	if err != nil {
+		return nil, err
+	}
+	defer members.Close()
+	for members.Next() {
+		var m Member
+		if err := members.Scan(&m.TenantID, &m.UserID, &m.Role); err != nil {
+			return nil, err
+		}
+		s.members[memberKey(m.UserID, m.TenantID)] = m
+	}
+	return s, rows.Err()
+}
+
+func (s *Service) saveUser(u *User) error {
+	if s.db == nil {
+		return nil
+	}
+	_, err := s.db.Exec(`INSERT INTO users (id,email,password_hash,disabled) VALUES ($1,$2,$3,$4)`, u.ID, u.Email, u.PasswordHash, u.Disabled)
+	return err
+}
+func (s *Service) saveMember(m Member) error {
+	if s.db == nil {
+		return nil
+	}
+	_, err := s.db.Exec(`INSERT INTO tenant_members (tenant_id,user_id,role) VALUES ($1,$2,$3) ON CONFLICT (tenant_id,user_id) DO UPDATE SET role=EXCLUDED.role`, m.TenantID, m.UserID, m.Role)
+	return err
+}
+func (s *Service) saveRefresh(r *RefreshToken) error {
+	if s.db == nil {
+		return nil
+	}
+	_, err := s.db.Exec(`INSERT INTO refresh_tokens (id,user_id,token_hash,expires_at,revoked_at) VALUES ($1,$2,$3,$4,NULL)`, r.Hash, r.UserID, r.Hash, r.ExpiresAt)
+	return err
+}
+func (s *Service) revokeRefresh(hash string) error {
+	if s.db == nil {
+		return nil
+	}
+	_, err := s.db.Exec(`UPDATE refresh_tokens SET revoked_at=now() WHERE token_hash=$1 AND revoked_at IS NULL`, hash)
+	return err
+}
+func (s *Service) loadRefresh(hash string) (*RefreshToken, error) {
+	if r := s.refresh[hash]; r != nil {
+		return r, nil
+	}
+	if s.db == nil {
+		return nil, nil
+	}
+	r := &RefreshToken{Hash: hash}
+	var revokedAt sql.NullTime
+	err := s.db.QueryRow(`SELECT user_id, expires_at, revoked_at FROM refresh_tokens WHERE token_hash=$1`, hash).Scan(&r.UserID, &r.ExpiresAt, &revokedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	r.Revoked = revokedAt.Valid
+	for _, m := range s.members {
+		if m.UserID == r.UserID {
+			r.TenantID = m.TenantID
+			r.Role = m.Role
+			break
+		}
+	}
+	if r.TenantID == "" {
+		return nil, fmt.Errorf("refresh token tenant membership missing")
+	}
+	s.refresh[hash] = r
+	return r, nil
+}
+
+// Bootstrap 创建首个租户管理员；只允许在完全空的身份仓库中执行一次。
+func (s *Service) Bootstrap(id, email, password, tenantID string) (*User, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.users) != 0 {
+		return nil, fmt.Errorf("bootstrap is already complete")
+	}
+	if id == "" || email == "" || tenantID == "" {
+		return nil, fmt.Errorf("id, email and tenant are required")
+	}
+	hash, err := platformauth.HashPassword(password)
+	if err != nil {
+		return nil, err
+	}
+	u := &User{ID: id, Email: email, PasswordHash: hash}
+	if err := s.saveUser(u); err != nil {
+		return nil, err
+	}
+	m := Member{UserID: id, TenantID: tenantID, Role: platformauth.RoleTenantAdmin}
+	if err := s.saveMember(m); err != nil {
+		return nil, err
+	}
+	s.users[id] = u
+	s.byEmail[email] = id
+	s.members[memberKey(id, tenantID)] = m
+	return u, nil
 }
 
 func memberKey(userID, tenantID string) string { return userID + "\x00" + tenantID }
@@ -62,6 +183,9 @@ func (s *Service) CreateUser(id, email, password string) (*User, error) {
 		return nil, err
 	}
 	u := &User{ID: id, Email: email, PasswordHash: hash}
+	if err := s.saveUser(u); err != nil {
+		return nil, err
+	}
 	s.users[id] = u
 	s.byEmail[email] = id
 	return u, nil
@@ -76,8 +200,24 @@ func (s *Service) SetMember(userID, tenantID string, role platformauth.Role) err
 	if role != platformauth.RolePlatformAdmin && role != platformauth.RoleTenantAdmin && role != platformauth.RoleDeveloper && role != platformauth.RoleViewer {
 		return fmt.Errorf("invalid role")
 	}
-	s.members[memberKey(userID, tenantID)] = Member{UserID: userID, TenantID: tenantID, Role: role}
+	m := Member{UserID: userID, TenantID: tenantID, Role: role}
+	if err := s.saveMember(m); err != nil {
+		return err
+	}
+	s.members[memberKey(userID, tenantID)] = m
 	return nil
+}
+
+func (s *Service) Members(tenantID string) []Member {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := make([]Member, 0)
+	for _, member := range s.members {
+		if tenantID == "" || member.TenantID == tenantID {
+			result = append(result, member)
+		}
+	}
+	return result
 }
 
 func (s *Service) Login(email, password, tenantID string) (*Session, error) {
@@ -101,9 +241,13 @@ func (s *Service) Login(email, password, tenantID string) (*Session, error) {
 func (s *Service) Refresh(token string) (*Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	r, ok := s.refresh[platformauth.HashRefreshToken(token)]
-	if !ok || r.Revoked || !r.ExpiresAt.After(s.now()) {
+	hash := platformauth.HashRefreshToken(token)
+	r, err := s.loadRefresh(hash)
+	if err != nil || r == nil || r.Revoked || !r.ExpiresAt.After(s.now()) {
 		return nil, fmt.Errorf("invalid refresh token")
+	}
+	if err := s.revokeRefresh(hash); err != nil {
+		return nil, err
 	}
 	r.Revoked = true
 	return s.issueLocked(r.UserID, Member{TenantID: r.TenantID, UserID: r.UserID, Role: r.Role})
@@ -111,7 +255,9 @@ func (s *Service) Refresh(token string) (*Session, error) {
 func (s *Service) Logout(token string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if r := s.refresh[platformauth.HashRefreshToken(token)]; r != nil {
+	hash := platformauth.HashRefreshToken(token)
+	if r, _ := s.loadRefresh(hash); r != nil {
+		_ = s.revokeRefresh(hash)
 		r.Revoked = true
 	}
 }
@@ -128,6 +274,9 @@ func (s *Service) issueLocked(userID string, m Member) (*Session, error) {
 	}
 	exp := now.Add(30 * 24 * time.Hour)
 	s.refresh[hash] = &RefreshToken{Hash: hash, UserID: userID, TenantID: m.TenantID, Role: m.Role, ExpiresAt: exp}
+	if err := s.saveRefresh(s.refresh[hash]); err != nil {
+		return nil, err
+	}
 	return &Session{AccessToken: access, RefreshToken: refresh, TenantID: m.TenantID, Role: m.Role, ExpiresAt: now.Add(15 * time.Minute)}, nil
 }
 

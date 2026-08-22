@@ -33,3 +33,16 @@ func TestLoginRefreshLogout(t *testing.T) {
 		t.Fatal("logged-out refresh token reused")
 	}
 }
+
+func TestBootstrapOnlyOnce(t *testing.T) {
+	s := NewService("test-secret")
+	if _, err := s.Bootstrap("u1", "admin@example.com", "correct horse battery staple", "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Login("admin@example.com", "correct horse battery staple", "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Bootstrap("u2", "other@example.com", "correct horse battery staple", "tenant-b"); err == nil {
+		t.Fatal("second bootstrap accepted")
+	}
+}

@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"flag"
 	"log/slog"
 	"net/http"
@@ -40,8 +41,10 @@ func main() {
 	var repo data.DeploymentRepository
 	var quotaStore data.QuotaStore
 	var auditStore data.AuditStore
+	var db *sql.DB
 	if *storage == "postgres" {
-		db, err := store.Open(store.DefaultConfig())
+		var err error
+		db, err = store.Open(store.DefaultConfig())
 		if err != nil {
 			logger.Error("连接 Postgres 失败", "err", err)
 			os.Exit(1)
@@ -77,7 +80,16 @@ func main() {
 	resUse := biz.NewResourceUseCase(kubeClient)
 	srv := server.NewServer(deployUse, resUse, quotaUse, auditUse, repo, logger)
 	if *authSecret != "" {
-		srv.SetIdentityService(identity.NewService(*authSecret))
+		identityService := identity.NewService(*authSecret)
+		if db != nil {
+			postgresIdentity, err := identity.NewPostgresService(db, *authSecret)
+			if err != nil {
+				logger.Error("恢复身份服务失败", "err", err)
+				os.Exit(1)
+			}
+			identityService = postgresIdentity
+		}
+		srv.SetIdentityService(identityService)
 	}
 	if *observabilityURL != "" {
 		srv.SetObservabilityClient(clients.NewObservabilityClient(*observabilityURL))

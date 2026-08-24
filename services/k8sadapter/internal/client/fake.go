@@ -47,7 +47,8 @@ type FakeKubeClient struct {
 	mu           sync.RWMutex
 	nodes        []FakeNodeConfig
 	deploys      map[string]*FakeDeployment // key: namespace/name
-	startLatency time.Duration              // 每阶段推进延迟
+	tenants      map[string]bool
+	startLatency time.Duration // 每阶段推进延迟
 }
 
 // NewFakeKubeClient 创建 Fake 客户端
@@ -55,8 +56,19 @@ func NewFakeKubeClient(nodes []FakeNodeConfig) *FakeKubeClient {
 	return &FakeKubeClient{
 		nodes:        nodes,
 		deploys:      make(map[string]*FakeDeployment),
+		tenants:      make(map[string]bool),
 		startLatency: 1200 * time.Millisecond,
 	}
+}
+
+func (f *FakeKubeClient) ProvisionTenant(_ context.Context, tenantID string) error {
+	if tenantID == "" || strings.Contains(tenantID, "/") {
+		return fmt.Errorf("invalid tenant id")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.tenants[tenantID] = true
+	return nil
 }
 
 // key 组装部署键

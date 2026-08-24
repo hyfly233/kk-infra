@@ -4,11 +4,38 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"strings"
 	"time"
 
 	"kk-infra/lib/domain"
 	"kk-infra/services/k8sadapter/internal/k8s"
 )
+
+// ProvisionTenant 创建租户 Namespace 及默认拒绝入口/出口的网络策略。
+// 其余租户资源由后续 RBAC/配额控制器补齐；每项先 GET 再 POST，重复调用安全。
+func (c *RealKubeClient) ProvisionTenant(ctx context.Context, tenantID string) error {
+	if tenantID == "" || strings.Contains(tenantID, "/") {
+		return fmt.Errorf("invalid tenant id")
+	}
+	ns := "tenant-" + tenantID
+	if err := c.ensure(ctx, "/api/v1/namespaces/"+ns, "/api/v1/namespaces", map[string]interface{}{"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]interface{}{"name": ns, "labels": map[string]string{"carrot.ai/tenant-id": tenantID}}}); err != nil {
+		return err
+	}
+	return c.ensure(ctx, "/apis/networking.k8s.io/v1/namespaces/"+ns+"/networkpolicies/default-deny", "/apis/networking.k8s.io/v1/namespaces/"+ns+"/networkpolicies", map[string]interface{}{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": map[string]interface{}{"name": "default-deny", "namespace": ns}, "spec": map[string]interface{}{"podSelector": map[string]interface{}{}, "policyTypes": []string{"Ingress", "Egress"}}})
+}
+
+func (c *RealKubeClient) ensure(ctx context.Context, getPath, postPath string, body interface{}) error {
+	var ignored interface{}
+	err := c.do(ctx, http.MethodGet, getPath, nil, &ignored)
+	if err == nil {
+		return nil
+	}
+	if err != ErrNotFound {
+		return err
+	}
+	return c.do(ctx, http.MethodPost, postPath, body, &ignored)
+}
 
 // ---- KubeClient 接口实现（真实集群） ----
 

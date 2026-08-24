@@ -56,6 +56,8 @@ type KubeClient interface {
 	RestartDeployment(ctx context.Context, name, namespace string) (*DeploymentResult, error)
 	// DeleteDeployment 幂等删除（资源不存在返回成功）
 	DeleteDeployment(ctx context.Context, name, namespace string) error
+	// ProvisionTenant 幂等创建租户命名空间及最小隔离资源。
+	ProvisionTenant(ctx context.Context, tenantID string) error
 	// NodeGPUCapacity 查询指定 GPU 类型的全局可用数（供配额校验）
 	NodeGPUCapacity(ctx context.Context, gpuType string) (total, allocatable, used int32, err error)
 }

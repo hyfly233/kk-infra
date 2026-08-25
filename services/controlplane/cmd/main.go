@@ -79,6 +79,7 @@ func main() {
 	deployUse.SetAudit(auditUse)
 	resUse := biz.NewResourceUseCase(kubeClient)
 	srv := server.NewServer(deployUse, resUse, quotaUse, auditUse, repo, logger)
+	srv.SetTenantProvisioner(kubeClient)
 	if *authSecret != "" {
 		identityService := identity.NewService(*authSecret)
 		if db != nil {

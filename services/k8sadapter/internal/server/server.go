@@ -31,6 +31,7 @@ func NewServer(kube client.KubeClient, logger *slog.Logger) *Server {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/resources/gpus", s.handleListGPUs)
+	mux.HandleFunc("POST /v1/tenants/{tenantId}/provision", s.handleProvisionTenant)
 	mux.HandleFunc("POST /v1/deployments", s.handleCreateDeployment)
 	mux.HandleFunc("PUT /v1/deployments/{name}", s.handleUpdateDeployment)
 	mux.HandleFunc("GET /v1/deployments/{name}", s.handleGetDeployment)
@@ -43,6 +44,16 @@ func (s *Server) Handler() http.Handler {
 			middleware.AccessLog(s.logger, mux),
 		),
 	)
+}
+
+func (s *Server) handleProvisionTenant(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := s.reqCtx(r)
+	defer cancel()
+	if err := s.kube.ProvisionTenant(ctx, r.PathValue("tenantId")); err != nil {
+		apitypes.WriteResult(w, r, nil, errcode.Wrap(errcode.ErrInternal, "初始化租户 Kubernetes 资源失败", err))
+		return
+	}
+	apitypes.WriteResult(w, r, map[string]bool{"provisioned": true}, nil)
 }
 
 // 带超时的上下文

@@ -31,6 +31,9 @@ type Server struct {
 	logger        *slog.Logger
 	observability *clients.ObservabilityClient // 可为 nil（未配置时返回占位）
 	identity      *identity.Service
+	provisioner   interface {
+		ProvisionTenant(context.Context, string) error
+	}
 }
 
 // NewServer 创建服务
@@ -44,6 +47,9 @@ func (s *Server) SetObservabilityClient(c *clients.ObservabilityClient) {
 }
 
 func (s *Server) SetIdentityService(service *identity.Service) { s.identity = service }
+func (s *Server) SetTenantProvisioner(p interface {
+	ProvisionTenant(context.Context, string) error
+}) { s.provisioner = p }
 
 // Handler 路由
 func (s *Server) Handler() http.Handler {
@@ -137,6 +143,12 @@ func (s *Server) handleBootstrap(w http.ResponseWriter, r *http.Request) {
 	if json.NewDecoder(r.Body).Decode(&req) != nil {
 		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, "请求体解析失败"))
 		return
+	}
+	if s.provisioner != nil {
+		if err := s.provisioner.ProvisionTenant(r.Context(), req.TenantID); err != nil {
+			apitypes.WriteResult(w, r, nil, errcode.Wrap(errcode.ErrUpstream, "初始化租户 Kubernetes 资源失败", err))
+			return
+		}
 	}
 	u, err := s.identity.Bootstrap(req.ID, req.Email, req.Password, req.TenantID)
 	if err != nil {

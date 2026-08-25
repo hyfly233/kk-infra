@@ -208,6 +208,11 @@ func (c *K8sAdapterClient) ListGPUs(ctx context.Context) ([]domain.GPUResource, 
 	return nodes, nil
 }
 
+// ProvisionTenant 创建租户 Namespace 与隔离资源。
+func (c *K8sAdapterClient) ProvisionTenant(ctx context.Context, tenantID string) error {
+	return c.do(ctx, http.MethodPost, "/v1/tenants/"+tenantID+"/provision", nil, nil)
+}
+
 // CreateDeployment 创建部署
 func (c *K8sAdapterClient) CreateDeployment(ctx context.Context, spec *CreateDeploymentSpec) (*K8sDeploymentResult, error) {
 	var res K8sDeploymentResult

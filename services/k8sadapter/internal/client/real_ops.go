@@ -22,6 +22,18 @@ func (c *RealKubeClient) ProvisionTenant(ctx context.Context, tenantID string) e
 	if err := c.ensure(ctx, "/api/v1/namespaces/"+ns, "/api/v1/namespaces", map[string]interface{}{"apiVersion": "v1", "kind": "Namespace", "metadata": map[string]interface{}{"name": ns, "labels": map[string]string{"carrot.ai/tenant-id": tenantID}}}); err != nil {
 		return err
 	}
+	if err := c.ensure(ctx, "/api/v1/namespaces/"+ns+"/serviceaccounts/tenant-runtime", "/api/v1/namespaces/"+ns+"/serviceaccounts", map[string]interface{}{"apiVersion": "v1", "kind": "ServiceAccount", "metadata": map[string]interface{}{"name": "tenant-runtime", "namespace": ns}, "automountServiceAccountToken": false}); err != nil {
+		return err
+	}
+	if err := c.ensure(ctx, "/apis/rbac.authorization.k8s.io/v1/namespaces/"+ns+"/roles/tenant-runtime", "/apis/rbac.authorization.k8s.io/v1/namespaces/"+ns+"/roles", map[string]interface{}{"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role", "metadata": map[string]interface{}{"name": "tenant-runtime", "namespace": ns}, "rules": []map[string]interface{}{{"apiGroups": []string{"apps"}, "resources": []string{"deployments"}, "verbs": []string{"get", "list", "watch"}}, {"apiGroups": []string{""}, "resources": []string{"pods", "services"}, "verbs": []string{"get", "list", "watch"}}}}); err != nil {
+		return err
+	}
+	if err := c.ensure(ctx, "/apis/rbac.authorization.k8s.io/v1/namespaces/"+ns+"/rolebindings/tenant-runtime", "/apis/rbac.authorization.k8s.io/v1/namespaces/"+ns+"/rolebindings", map[string]interface{}{"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding", "metadata": map[string]interface{}{"name": "tenant-runtime", "namespace": ns}, "roleRef": map[string]string{"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "tenant-runtime"}, "subjects": []map[string]string{{"kind": "ServiceAccount", "name": "tenant-runtime", "namespace": ns}}}); err != nil {
+		return err
+	}
+	if err := c.ensure(ctx, "/api/v1/namespaces/"+ns+"/resourcequotas/tenant-default", "/api/v1/namespaces/"+ns+"/resourcequotas", map[string]interface{}{"apiVersion": "v1", "kind": "ResourceQuota", "metadata": map[string]interface{}{"name": "tenant-default", "namespace": ns}, "spec": map[string]interface{}{"hard": map[string]string{"pods": "100", "requests.cpu": "100", "requests.memory": "256Gi"}}}); err != nil {
+		return err
+	}
 	return c.ensure(ctx, "/apis/networking.k8s.io/v1/namespaces/"+ns+"/networkpolicies/default-deny", "/apis/networking.k8s.io/v1/namespaces/"+ns+"/networkpolicies", map[string]interface{}{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": map[string]interface{}{"name": "default-deny", "namespace": ns}, "spec": map[string]interface{}{"podSelector": map[string]interface{}{}, "policyTypes": []string{"Ingress", "Egress"}}})
 }
 

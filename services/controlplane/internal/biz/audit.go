@@ -38,3 +38,17 @@ func (uc *AuditUseCase) Record(action, actor, tenantID, resource, requestID, det
 func (uc *AuditUseCase) List(limit int) ([]data.AuditEntry, error) {
 	return uc.store.List(limit)
 }
+
+func (uc *AuditUseCase) ListTenant(tenantID string, limit int) ([]data.AuditEntry, error) {
+	all, err := uc.store.List(limit)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]data.AuditEntry, 0)
+	for _, entry := range all {
+		if entry.TenantID == tenantID {
+			result = append(result, entry)
+		}
+	}
+	return result, nil
+}

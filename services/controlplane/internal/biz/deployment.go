@@ -34,6 +34,7 @@ type GatewayClient interface {
 	RegisterRoute(ctx context.Context, model, endpoint, tenantID, deploymentID string) error
 	UnregisterRoute(ctx context.Context, model string) error
 }
+type TenantState interface{ TenantActive(tenantID string) bool }
 
 // DeploymentUseCase 部署业务用例
 type DeploymentUseCase struct {
@@ -52,6 +53,7 @@ type DeploymentUseCase struct {
 	audit *AuditUseCase
 	// gateway 可为 nil，供不启动推理网关的单元测试使用。
 	gateway GatewayClient
+	tenants TenantState
 }
 
 // NewDeploymentUseCase 创建用例
@@ -80,6 +82,7 @@ func (uc *DeploymentUseCase) SetAudit(audit *AuditUseCase) {
 func (uc *DeploymentUseCase) SetGateway(gateway GatewayClient) {
 	uc.gateway = gateway
 }
+func (uc *DeploymentUseCase) SetTenantState(tenants TenantState) { uc.tenants = tenants }
 
 // SetDeploymentImage 设置部署镜像（验证环境注入 mock 镜像）
 func (uc *DeploymentUseCase) SetDeploymentImage(image string) {
@@ -109,6 +112,9 @@ func (uc *DeploymentUseCase) CreateDeployment(ctx context.Context, req *apitypes
 	tenantID := req.TenantID
 	if tenantID == "" {
 		tenantID = uc.defaultTenant
+	}
+	if uc.tenants != nil && !uc.tenants.TenantActive(tenantID) {
+		return nil, errcode.New(errcode.ErrUnauthorized, "租户已禁用，不能创建部署")
 	}
 	if err := uc.checkGPUQuota(ctx, version.GPUType, version.GPUCount, req.Replicas); err != nil {
 		return nil, err

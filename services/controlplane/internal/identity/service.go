@@ -39,13 +39,14 @@ type Service struct {
 	byEmail map[string]string
 	members map[string]Member
 	refresh map[string]*RefreshToken
+	tenants map[string]bool
 	secret  string
 	now     func() time.Time
 	db      *sql.DB
 }
 
 func NewService(secret string) *Service {
-	return &Service{users: map[string]*User{}, byEmail: map[string]string{}, members: map[string]Member{}, refresh: map[string]*RefreshToken{}, secret: secret, now: time.Now}
+	return &Service{users: map[string]*User{}, byEmail: map[string]string{}, members: map[string]Member{}, refresh: map[string]*RefreshToken{}, tenants: map[string]bool{}, secret: secret, now: time.Now}
 }
 
 // NewPostgresService 启动时恢复用户和租户成员；refresh token 在请求时再验证数据库状态。
@@ -77,7 +78,44 @@ func NewPostgresService(db *sql.DB, secret string) (*Service, error) {
 		}
 		s.members[memberKey(m.UserID, m.TenantID)] = m
 	}
+	tenantRows, err := db.Query(`SELECT id, disabled FROM tenants`)
+	if err != nil {
+		return nil, err
+	}
+	defer tenantRows.Close()
+	for tenantRows.Next() {
+		var id string
+		var disabled bool
+		if err := tenantRows.Scan(&id, &disabled); err != nil {
+			return nil, err
+		}
+		s.tenants[id] = disabled
+	}
 	return s, rows.Err()
+}
+
+func (s *Service) saveTenant(id string, disabled bool) error {
+	if s.db == nil {
+		return nil
+	}
+	_, err := s.db.Exec(`INSERT INTO tenants (id,disabled) VALUES ($1,$2) ON CONFLICT (id) DO UPDATE SET disabled=EXCLUDED.disabled,updated_at=now()`, id, disabled)
+	return err
+}
+
+func (s *Service) TenantActive(tenantID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	disabled, ok := s.tenants[tenantID]
+	return !ok || !disabled
+}
+func (s *Service) DisableTenant(tenantID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.saveTenant(tenantID, true); err != nil {
+		return err
+	}
+	s.tenants[tenantID] = true
+	return nil
 }
 
 func (s *Service) saveUser(u *User) error {
@@ -158,6 +196,9 @@ func (s *Service) Bootstrap(id, email, password, tenantID string) (*User, error)
 		return nil, err
 	}
 	m := Member{UserID: id, TenantID: tenantID, Role: platformauth.RoleTenantAdmin}
+	if err := s.saveTenant(tenantID, false); err != nil {
+		return nil, err
+	}
 	if err := s.saveMember(m); err != nil {
 		return nil, err
 	}

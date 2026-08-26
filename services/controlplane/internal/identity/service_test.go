@@ -46,3 +46,19 @@ func TestBootstrapOnlyOnce(t *testing.T) {
 		t.Fatal("second bootstrap accepted")
 	}
 }
+
+func TestDisableTenantBlocksTenantState(t *testing.T) {
+	s := NewService("test-secret")
+	if _, err := s.Bootstrap("u1", "admin@example.com", "correct horse battery staple", "tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	if !s.TenantActive("tenant-a") {
+		t.Fatal("new tenant should be active")
+	}
+	if err := s.DisableTenant("tenant-a"); err != nil {
+		t.Fatal(err)
+	}
+	if s.TenantActive("tenant-a") {
+		t.Fatal("disabled tenant accepted")
+	}
+}

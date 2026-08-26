@@ -25,6 +25,20 @@ func (uc *QuotaUseCase) List() ([]*domain.TenantQuota, error) {
 	return uc.store.List()
 }
 
+func (uc *QuotaUseCase) ListTenant(tenantID string) ([]*domain.TenantQuota, error) {
+	all, err := uc.store.List()
+	if err != nil {
+		return nil, err
+	}
+	result := make([]*domain.TenantQuota, 0)
+	for _, quota := range all {
+		if quota.TenantID == tenantID {
+			result = append(result, quota)
+		}
+	}
+	return result, nil
+}
+
 // Set 设置配额上限（管理员）
 func (uc *QuotaUseCase) Set(tenantID, gpuType string, quota int32) (*domain.TenantQuota, error) {
 	if tenantID == "" || gpuType == "" || quota < 0 {

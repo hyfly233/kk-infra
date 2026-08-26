@@ -49,7 +49,9 @@ func (s *Server) SetObservabilityClient(c *clients.ObservabilityClient) {
 func (s *Server) SetIdentityService(service *identity.Service) { s.identity = service }
 func (s *Server) SetTenantProvisioner(p interface {
 	ProvisionTenant(context.Context, string) error
-}) { s.provisioner = p }
+}) {
+	s.provisioner = p
+}
 
 // Handler 路由
 func (s *Server) Handler() http.Handler {
@@ -61,6 +63,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/users", s.handleCreateUser)
 	mux.HandleFunc("GET /api/v1/tenants/{tenantId}/members", s.handleListMembers)
 	mux.HandleFunc("PUT /api/v1/tenants/{tenantId}/members/{userId}", s.handleSetMember)
+	mux.HandleFunc("POST /api/v1/tenants/{tenantId}/disable", s.handleDisableTenant)
 
 	// 部署
 	mux.HandleFunc("POST /api/v1/deployments", s.handleCreateDeployment)
@@ -215,6 +218,15 @@ func (s *Server) requireTenantAdmin(w http.ResponseWriter, r *http.Request, tena
 	return true
 }
 
+func requirePlatformAdmin(w http.ResponseWriter, r *http.Request) bool {
+	claims := claimsFrom(r.Context())
+	if claims == nil || claims.Role != platformauth.RolePlatformAdmin {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "需要平台管理员权限"))
+		return false
+	}
+	return true
+}
+
 func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	if s.identity == nil {
 		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrIllegalState, "身份服务未配置"))
@@ -265,6 +277,18 @@ func (s *Server) handleSetMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	apitypes.WriteResult(w, r, map[string]bool{"updated": true}, nil)
+}
+func (s *Server) handleDisableTenant(w http.ResponseWriter, r *http.Request) {
+	claims := claimsFrom(r.Context())
+	if claims == nil || claims.Role != platformauth.RolePlatformAdmin {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "需要平台管理员权限"))
+		return
+	}
+	if err := s.identity.DisableTenant(r.PathValue("tenantId")); err != nil {
+		apitypes.WriteResult(w, r, nil, errcode.Wrap(errcode.ErrInternal, "禁用租户失败", err))
+		return
+	}
+	apitypes.WriteResult(w, r, map[string]bool{"disabled": true}, nil)
 }
 
 // ---- 部署 ----
@@ -435,7 +459,17 @@ func (s *Server) handleListGPUs(w http.ResponseWriter, r *http.Request) {
 // ---- 租户配额（R2-4） ----
 
 func (s *Server) handleListQuotas(w http.ResponseWriter, r *http.Request) {
-	list, err := s.quotas.List()
+	if claims := claimsFrom(r.Context()); claims != nil && claims.Role != platformauth.RolePlatformAdmin && claims.Role != platformauth.RoleTenantAdmin {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "需要管理员权限"))
+		return
+	}
+	var list interface{}
+	var err error
+	if claims := claimsFrom(r.Context()); claims != nil && claims.Role == platformauth.RoleTenantAdmin {
+		list, err = s.quotas.ListTenant(claims.TenantID)
+	} else {
+		list, err = s.quotas.List()
+	}
 	if err != nil {
 		apitypes.WriteResult(w, r, nil, err)
 		return
@@ -444,6 +478,9 @@ func (s *Server) handleListQuotas(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSetQuota(w http.ResponseWriter, r *http.Request) {
+	if !requirePlatformAdmin(w, r) {
+		return
+	}
 	var req struct {
 		GPUType string `json:"gpuType"`
 		Quota   int32  `json:"quota"`
@@ -463,13 +500,23 @@ func (s *Server) handleSetQuota(w http.ResponseWriter, r *http.Request) {
 // ---- 审计日志（R2-4） ----
 
 func (s *Server) handleListAudit(w http.ResponseWriter, r *http.Request) {
+	if claims := claimsFrom(r.Context()); claims != nil && claims.Role != platformauth.RolePlatformAdmin && claims.Role != platformauth.RoleTenantAdmin {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "需要管理员权限"))
+		return
+	}
 	limit := 50
 	if v := r.URL.Query().Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
 			limit = n
 		}
 	}
-	list, err := s.audit.List(limit)
+	var list interface{}
+	var err error
+	if claims := claimsFrom(r.Context()); claims != nil && claims.Role == platformauth.RoleTenantAdmin {
+		list, err = s.audit.ListTenant(claims.TenantID, limit)
+	} else {
+		list, err = s.audit.List(limit)
+	}
 	if err != nil {
 		apitypes.WriteResult(w, r, nil, err)
 		return

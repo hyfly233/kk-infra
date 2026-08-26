@@ -91,6 +91,7 @@ func main() {
 			identityService = postgresIdentity
 		}
 		srv.SetIdentityService(identityService)
+		deployUse.SetTenantState(identityService)
 	}
 	if *observabilityURL != "" {
 		srv.SetObservabilityClient(clients.NewObservabilityClient(*observabilityURL))

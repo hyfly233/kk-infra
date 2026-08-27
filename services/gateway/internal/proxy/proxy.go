@@ -20,7 +20,7 @@ import (
 
 // MetricsSink 指标上报接口（observability 注入，nil 可跳过）
 type MetricsSink interface {
-	Record(deploymentID, model string, latencyMs int64, ttftMs int64, tokens int, err bool)
+	Record(tenantID, deploymentID, model string, latencyMs int64, ttftMs int64, tokens int, err bool)
 }
 
 // AuthorizeFunc 模型授权回调（R2-4：API Key 模型白名单）。
@@ -29,10 +29,10 @@ type AuthorizeFunc func(ctx context.Context, apiKey, model string) error
 
 // Proxy 推理代理
 type Proxy struct {
-	routes  *router.Table
-	client  *http.Client
-	logger  *slog.Logger
-	metrics MetricsSink
+	routes    *router.Table
+	client    *http.Client
+	logger    *slog.Logger
+	metrics   MetricsSink
 	authorize AuthorizeFunc // 可为 nil（不校验模型授权）
 
 	// 租户限流（简单令牌桶：每分钟 N 请求）
@@ -232,7 +232,7 @@ func (p *Proxy) forwardStream(w http.ResponseWriter, r *http.Request, upResp *ht
 // record 指标上报
 func (p *Proxy) record(route *router.Route, start time.Time, latencyMs, ttftMs, tokens int64, err bool) {
 	if p.metrics != nil {
-		p.metrics.Record(route.DeploymentID, route.Model, latencyMs, ttftMs, int(tokens), err)
+		p.metrics.Record(route.TenantID, route.DeploymentID, route.Model, latencyMs, ttftMs, int(tokens), err)
 	}
 }
 

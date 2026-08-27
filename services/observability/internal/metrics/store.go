@@ -11,13 +11,14 @@ import (
 
 // Sample 一条请求指标采样
 type Sample struct {
-	Ts        time.Time
+	Ts           time.Time
+	TenantID     string
 	DeploymentID string
-	Model     string
-	LatencyMs int64
-	TTFTMs    int64
-	Tokens    int
-	Err       bool
+	Model        string
+	LatencyMs    int64
+	TTFTMs       int64
+	Tokens       int
+	Err          bool
 }
 
 // GPUSample 一条 GPU 利用率采样（节点 × 型号粒度）
@@ -112,7 +113,7 @@ func ParseRange(r string, now time.Time) Range {
 
 // Bucket 时间桶（聚合点）
 type Bucket struct {
-	Ts         int64   // 桶起始 unix 秒
+	Ts         int64 // 桶起始 unix 秒
 	Requests   int64
 	Errors     int64
 	LatencySum int64
@@ -215,7 +216,7 @@ func (s *Store) GPUMetrics(r Range) GPUSeries {
 			buckets = append(buckets, Bucket{Ts: k})
 		}
 		b := &buckets[i]
-		b.Requests++          // 复用为采样数
+		b.Requests++                               // 复用为采样数
 		b.LatencySum += int64(g.Utilization * 100) // 存放大 100 倍，避免浮点误差
 	}
 	sort.Slice(buckets, func(i, j int) bool { return buckets[i].Ts < buckets[j].Ts })

@@ -61,6 +61,7 @@ func (s *Server) Handler() http.Handler {
 // ---- 上报 ----
 
 type recordRequestReq struct {
+	TenantID     string `json:"tenantId"`
 	DeploymentID string `json:"deploymentId"`
 	Model        string `json:"model"`
 	LatencyMs    int64  `json:"latencyMs"`
@@ -81,6 +82,7 @@ func (s *Server) handleRecordRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	s.store.RecordRequest(metrics.Sample{
 		Ts:           time.Now(),
+		TenantID:     req.TenantID,
 		DeploymentID: req.DeploymentID,
 		Model:        req.Model,
 		LatencyMs:    req.LatencyMs,

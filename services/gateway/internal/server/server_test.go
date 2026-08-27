@@ -31,7 +31,7 @@ type proxyMetric struct {
 	err          bool
 }
 
-func (m *mockMetrics) Record(deploymentID, model string, latencyMs, ttftMs int64, tokens int, err bool) {
+func (m *mockMetrics) Record(_ string, deploymentID, model string, latencyMs, ttftMs int64, tokens int, err bool) {
 	m.records = append(m.records, proxyMetric{deploymentID, model, latencyMs, ttftMs, tokens, err})
 }
 

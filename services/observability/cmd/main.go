@@ -13,10 +13,12 @@ import (
 	"time"
 
 	"kk-infra/lib/apitypes"
+	platformstore "kk-infra/lib/store"
 	"kk-infra/services/observability/internal/collector"
 	"kk-infra/services/observability/internal/metrics"
 	"kk-infra/services/observability/internal/prometheus"
 	"kk-infra/services/observability/internal/server"
+	"kk-infra/services/observability/internal/usage"
 )
 
 func main() {
@@ -24,12 +26,25 @@ func main() {
 	retention := flag.Duration("retention", 2*time.Hour, "指标保留窗口")
 	controlplaneURL := flag.String("controlplane-url", "", "controlplane 地址（如 http://localhost:8080），配置后启用 GPU 指标采集")
 	prometheusURL := flag.String("prometheus-url", "", "Prometheus 地址（如 http://localhost:9090），配置后 GPU 查询走 DCGM 指标")
+	storage := flag.String("storage", "memory", "存储后端: memory | postgres")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 	store := metrics.NewStore(*retention)
 	srv := server.NewServer(store, logger)
+	if *storage == "postgres" {
+		db, err := platformstore.Open(platformstore.DefaultConfig())
+		if err != nil {
+			logger.Error("连接 Postgres 失败", "err", err)
+			os.Exit(1)
+		}
+		if err := platformstore.MigrateAll(db); err != nil {
+			logger.Error("执行 migration 失败", "err", err)
+			os.Exit(1)
+		}
+		srv.SetUsageStore(usage.NewPostgresStore(db))
+	}
 
 	// R2-3：Prometheus adapter（DCGM 指标查询）
 	if *prometheusURL != "" {

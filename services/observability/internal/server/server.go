@@ -20,6 +20,7 @@ import (
 	"kk-infra/lib/middleware"
 	"kk-infra/services/observability/internal/metrics"
 	"kk-infra/services/observability/internal/prometheus"
+	"kk-infra/services/observability/internal/usage"
 )
 
 // Server observability HTTP 服务
@@ -27,7 +28,10 @@ type Server struct {
 	store  *metrics.Store
 	logger *slog.Logger
 	prom   *prometheus.Client // 可为 nil（无 Prometheus 时降级内存存储）
+	usage  usage.Store
 }
+
+func (s *Server) SetUsageStore(store usage.Store) { s.usage = store }
 
 // NewServer 创建 HTTP 服务。
 func NewServer(store *metrics.Store, logger *slog.Logger) *Server {
@@ -90,6 +94,11 @@ func (s *Server) handleRecordRequest(w http.ResponseWriter, r *http.Request) {
 		Tokens:       req.Tokens,
 		Err:          req.Err,
 	})
+	if s.usage != nil {
+		if err := s.usage.Record(r.Context(), usage.Record{TenantID: req.TenantID, DeploymentID: req.DeploymentID, ModelID: req.Model, OutputTokens: req.Tokens, LatencyMs: req.LatencyMs, Failed: req.Err, CreatedAt: time.Now()}); err != nil {
+			s.logger.Warn("写入用量账本失败", "err", err)
+		}
+	}
 	apitypes.WriteResult(w, r, map[string]string{"status": "ok"}, nil)
 }
 

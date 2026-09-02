@@ -15,6 +15,7 @@ const allMenus = [
   { name: 'gpus', label: 'GPU 资源', path: '/gpus' },
   { name: 'quotas', label: '租户与配额', path: '/quotas', adminOnly: true },
   { name: 'audit', label: '告警与审计', path: '/audit', adminOnly: true },
+  { name: 'billing', label: '用量与账单', path: '/billing' },
   { name: 'keys', label: 'API Key', path: '/keys', adminOnly: true },
   { name: 'settings', label: '系统设置', path: '/settings', adminOnly: true },
 ]

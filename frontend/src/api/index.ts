@@ -4,6 +4,7 @@ import type {
   APIKey,
   Deployment,
   DeploymentView,
+	DailyUsage,
   GPUResourcesView,
   IssueKeyResult,
   MetricsView,
@@ -218,4 +219,22 @@ export interface AuditEntry {
 
 export function fetchAudit(limit = 50): Promise<AuditEntry[]> {
   return request(`/api/v1/audit?limit=${limit}`)
+}
+
+export function fetchBilling(tenantId: string, from: string, to: string): Promise<DailyUsage[]> {
+	const q = new URLSearchParams({ tenantId })
+	if (from) q.set('from', from)
+	if (to) q.set('to', to)
+	return request(`/api/v1/billing?${q}`)
+}
+
+export function billingCSVURL(tenantId: string, from: string, to: string): string {
+	const q = new URLSearchParams({ tenantId })
+	if (from) q.set('from', from)
+	if (to) q.set('to', to)
+	return `/api/v1/billing.csv?${q}`
+}
+
+export function setRateCard(tenantId: string, body: { gpuType: string; inputTokenPerMillion: number; outputTokenPerMillion: number; gpuHour: number }): Promise<unknown> {
+	return request(`/api/v1/rate-cards/${encodeURIComponent(tenantId)}`, { method: 'PUT', body: JSON.stringify(body) })
 }

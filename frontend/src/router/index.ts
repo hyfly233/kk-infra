@@ -80,6 +80,12 @@ const routes: RouteRecordRaw[] = [
         component: () => import('../views/AuditView.vue'),
         meta: { title: '告警与审计', adminOnly: true },
       },
+	  {
+		path: 'billing',
+		name: 'billing',
+		component: () => import('../views/BillingView.vue'),
+		meta: { title: '用量与账单' },
+	  },
       {
         path: 'keys',
         name: 'keys',

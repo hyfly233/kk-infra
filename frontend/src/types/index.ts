@@ -174,3 +174,15 @@ export interface MetricsView {
   range: string
   series: MetricSeries[]
 }
+
+export interface DailyUsage {
+	date: string
+	tenantId: string
+	deploymentId: string
+	inputTokens: number
+	outputTokens: number
+	requestCount: number
+	failedCount: number
+	gpuReplicaSeconds: number
+	estimatedCost: number
+}

@@ -8,6 +8,7 @@ const loading = ref(true)
 const error = ref('')
 const entries = ref<AuditEntry[]>([])
 const search = ref('')
+const prometheusAlertsURL = `${import.meta.env.VITE_PROMETHEUS_URL ?? 'http://localhost:9090'}/alerts`
 
 const filtered = () => {
   const q = search.value.trim().toLowerCase()
@@ -48,7 +49,8 @@ onMounted(load)
   <div class="page">
     <div class="page-header">
       <h2>告警与审计</h2>
-      <div class="flex">
+	  <div class="flex">
+		<a class="alert-link" :href="prometheusAlertsURL" target="_blank" rel="noopener">查看 Prometheus 告警 ↗</a>
         <input v-model="search" placeholder="搜索审计记录..." class="search-input" />
         <button class="ghost" @click="load">刷新</button>
       </div>
@@ -88,4 +90,5 @@ onMounted(load)
   font-family: 'SF Mono', Menlo, monospace;
   font-size: 12px;
 }
+.alert-link { color:var(--primary);text-decoration:none;font-size:12px }
 </style>

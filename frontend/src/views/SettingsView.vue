@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// 系统设置（管理员占位）
+// 系统设置
 </script>
 
 <template>
@@ -8,10 +8,10 @@
       <h2>系统设置</h2>
     </div>
     <div class="panel">
-      <div class="panel-title">租户与配额</div>
-      <p class="dim">
-        MVP 为单租户（default），多租户与配额管理将在后续版本提供。
-      </p>
+      <div class="panel-title">平台能力</div>
+	  <p class="dim">
+		已启用租户隔离、GPU 配额、审计、用量账本与可选 KEDA 自动扩缩容。生产环境的 JWT 密钥、PostgreSQL、Prometheus 与集群依赖通过服务启动参数配置。
+	  </p>
     </div>
     <div class="panel mt-16">
       <div class="panel-title">关于</div>

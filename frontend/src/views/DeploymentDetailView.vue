@@ -16,6 +16,7 @@ const loading = ref(true)
 const error = ref('')
 const dep = ref<DeploymentView | null>(null)
 const metrics = ref<MetricsView | null>(null)
+const metricRange = ref('1h')
 const actionError = ref('')
 
 // 扩容弹窗
@@ -58,13 +59,28 @@ const perfMetrics = computed<PerfMetric[]>(() => {
   ].filter((item): item is PerfMetric => item !== null)
 })
 
+const chartSeries = computed(() => (metrics.value?.series ?? []).filter((series) => series.points.length > 0).map((series) => {
+  const values = series.points.map((point) => point.val)
+  const min = Math.min(...values)
+  const max = Math.max(...values)
+  const span = max - min || 1
+  const lastIndex = Math.max(1, series.points.length - 1)
+  const points = series.points.map((point, index) => `${(index / lastIndex) * 100},${36 - ((point.val - min) / span) * 32}`).join(' ')
+  return { ...series, min, max, points }
+}))
+
+async function loadMetrics() {
+  try { metrics.value = await fetchDeploymentMetrics(id, metricRange.value) }
+  catch { metrics.value = null }
+}
+
 async function load() {
   loading.value = true
   error.value = ''
   try {
     dep.value = await fetchDeployment(id)
     try {
-      metrics.value = await fetchDeploymentMetrics(id, '1h')
+	  metrics.value = await fetchDeploymentMetrics(id, metricRange.value)
     } catch {
       metrics.value = null
     }
@@ -182,19 +198,27 @@ onMounted(load)
         </div>
 
         <!-- 性能 -->
-        <div v-if="activeTab === 'perf'" class="tab-content">
-          <div v-if="!perfMetrics.length" class="empty">暂无性能指标，调用 API 后展示</div>
-          <div v-else class="perf-grid">
+		<div v-if="activeTab === 'perf'" class="tab-content">
+		  <div class="metric-toolbar"><label>时间范围<select v-model="metricRange" @change="loadMetrics"><option value="15m">15 分钟</option><option value="1h">1 小时</option><option value="6h">6 小时</option><option value="24h">24 小时</option></select></label><button class="ghost" @click="loadMetrics">刷新</button></div>
+		  <div v-if="!perfMetrics.length" class="empty">暂无性能指标，调用 API 后展示</div>
+		  <div v-else class="perf-grid">
             <div v-for="m in perfMetrics" :key="m.name" class="perf-card">
               <div class="perf-label">{{ m.name }}</div>
               <div class="perf-value">{{ m.value }}</div>
-            </div>
+		  </div>
+		  <div v-if="chartSeries.length" class="chart-grid">
+			<div v-for="series in chartSeries" :key="series.name" class="chart-card">
+			  <div class="flex-between"><strong>{{ series.name }}</strong><span class="dim">{{ series.min.toFixed(2) }} – {{ series.max.toFixed(2) }}</span></div>
+			  <svg viewBox="0 0 100 40" preserveAspectRatio="none" role="img" :aria-label="series.name"><polyline :points="series.points" fill="none" stroke="currentColor" stroke-width="1.5" vector-effect="non-scaling-stroke" /></svg>
+			</div>
+		  </div>
           </div>
         </div>
 
         <!-- GPU -->
-        <div v-if="activeTab === 'gpu'" class="tab-content">
-          <div class="empty">GPU 指标通过 observability 查询（见 GPU 资源页）</div>
+		<div v-if="activeTab === 'gpu'" class="tab-content">
+		  <div v-if="!chartSeries.some((item) => item.name === 'gpuMemoryBytes')" class="empty">暂无部署级 GPU 显存采样</div>
+		  <div v-else class="chart-grid"><div v-for="series in chartSeries.filter((item) => item.name === 'gpuMemoryBytes' || item.name === 'kvCacheUsage')" :key="series.name" class="chart-card"><strong>{{ series.name }}</strong><svg viewBox="0 0 100 40" preserveAspectRatio="none"><polyline :points="series.points" fill="none" stroke="currentColor" stroke-width="1.5" vector-effect="non-scaling-stroke" /></svg></div></div>
         </div>
 
         <!-- 日志 -->
@@ -329,6 +353,12 @@ onMounted(load)
   font-weight: 700;
   color: var(--primary);
 }
+.metric-toolbar { display:flex;justify-content:flex-end;align-items:end;gap:10px;margin-bottom:12px }
+.metric-toolbar label { display:flex;flex-direction:column;gap:4px;color:var(--text-dim);font-size:12px }
+.chart-grid { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:14px }
+.chart-card { border:1px solid var(--border);border-radius:8px;padding:12px;color:var(--primary) }
+.chart-card strong { color:var(--text);font-size:12px }
+.chart-card svg { width:100%;height:110px;margin-top:8px;overflow:visible }
 .config-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -337,4 +367,5 @@ onMounted(load)
 .config-grid label {
   margin-bottom: 4px;
 }
+@media(max-width:900px){.perf-grid,.chart-grid{grid-template-columns:1fr 1fr}.info-grid,.config-grid{grid-template-columns:1fr 1fr}}
 </style>

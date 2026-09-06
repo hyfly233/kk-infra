@@ -60,6 +60,7 @@ PIDS+=($!)
 
 log "启动 observability :8084（GPU 采集来自 controlplane）"
 "$BIN_DIR/observability" --addr :8084 \
+	--storage "$STORAGE" \
   --controlplane-url http://127.0.0.1:8080 &
 PIDS+=($!)
 

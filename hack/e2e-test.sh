@@ -97,6 +97,11 @@ API_KEY=$(echo "$KEY_JSON" | json_field "['data']['key']")
 echo "API Key 已创建"
 
 # ---------- 7. OpenAI 调用 ----------
+log "7.0 配置测试费率"
+curl -s -X PUT "$OBS/internal/rate-cards/default" -H 'Content-Type: application/json' \
+  -d '{"gpuType":"default","inputTokenPerMillion":1,"outputTokenPerMillion":2,"gpuHour":3}' \
+  | grep -q '"code":0' || fail "配置测试费率失败"
+
 log "7.1 非流式调用 /v1/chat/completions"
 RESP=$(curl -s -X POST "$GW/v1/chat/completions" \
   -H "Authorization: Bearer $API_KEY" -H 'Content-Type: application/json' \
@@ -138,7 +143,14 @@ CP_JSON=$(curl -s "$CP/api/v1/deployments/$DEPLOY_ID/metrics?range=5m")
 echo "$CP_JSON" | grep -q '"requests"' || fail "controlplane 指标转发失败"
 echo "controlplane 指标转发 OK ✅"
 
-log "8.3 GPU 利用率指标"
+log "8.3 查询租户用量账单"
+BILLING_JSON=$(curl -s "$CP/api/v1/billing?tenantId=default")
+echo "$BILLING_JSON" | grep -q '"deploymentId"' || fail "账单缺少部署用量"
+OUTPUT_TOKENS=$(echo "$BILLING_JSON" | python3 -c "import sys,json; print(sum(x['outputTokens'] for x in json.load(sys.stdin)['data']))")
+[ "$OUTPUT_TOKENS" -gt 0 ] || fail "账单输出 Token 未累计"
+echo "账单累计输出 Token: $OUTPUT_TOKENS ✅"
+
+log "8.4 GPU 利用率指标"
 sleep 17  # 等待采集器下一轮（15s 周期）
 GPU_METRIC=$(curl -s "$OBS/api/v1/gpus/metrics?range=5m")
 echo "$GPU_METRIC" | head -c 400; echo

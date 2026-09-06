@@ -70,7 +70,7 @@ if [ -z "$MID" ]; then
   MID=$(curl -s -X POST "$MR/api/v1/models" -H 'Content-Type: application/json' -d '{"name":"contract-model"}' | json_field '["data"]["id"]')
 fi
 # 版本：尝试创建，冲突则查已有
-VID=$(curl -s -X POST "$MR/api/v1/models/$MID/versions" -H 'Content-Type: application/json' -d '{"version":"1.0","artifactUri":"s3://contract","runtime":"vLLM","gpuType":"A100","gpuCount":1,"memoryMB":32768}' | python3 -c "
+VID=$(curl -s -X POST "$MR/api/v1/models/$MID/versions" -H 'Content-Type: application/json' -d '{"version":"1.0","artifactUri":"s3://contract/model.bin","runtime":"vLLM","gpuType":"A100","gpuCount":1,"memoryMB":32768}' | python3 -c "
 import sys,json
 d=json.load(sys.stdin)
 if d.get('code')==0: print(d['data']['id'])

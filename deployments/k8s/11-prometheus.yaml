@@ -9,7 +9,12 @@ data:
   prometheus.yml: |
     global:
       scrape_interval: 15s
+    rule_files:
+      - /etc/prometheus/alerts.yml
     scrape_configs:
+      - job_name: carrot-observability
+        static_configs:
+          - targets: [observability.carrot-ai.svc.cluster.local:8084]
       # DCGM Exporter：GPU 指标
       - job_name: dcgm
         kubernetes_sd_configs:
@@ -61,8 +66,12 @@ spec:
               mountPath: /etc/prometheus
       volumes:
         - name: config
-          configMap:
-            name: prometheus-config
+          projected:
+            sources:
+              - configMap:
+                  name: prometheus-config
+              - configMap:
+                  name: prometheus-alert-rules
 ---
 apiVersion: v1
 kind: Service

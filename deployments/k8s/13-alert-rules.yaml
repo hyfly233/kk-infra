@@ -1,76 +1,52 @@
-# Prometheus 告警规则（R3：SLO/告警）
-# 对齐 PRD-V2 §5：可用性、TTFT、错误率；故障定位到事件/Pod
-groups:
-  - name: carrot-ai
-    rules:
-      # 服务不可用：vLLM 探针持续失败 5 分钟
-      - alert: ModelServiceDown
-        expr: sum by (deployment_id) (up{job="vllm"}) == 0
-        for: 5m
-        labels:
-          severity: critical
-        annotations:
-          summary: "模型服务 {{ $labels.deployment_id }} 不可用"
-          description: "部署 {{ $labels.deployment_id }} 的 vLLM 探针持续失败超过 5 分钟"
-
-      # 错误率超 SLO：>5% 持续 10 分钟
-      - alert: HighErrorRate
-        expr: |
-          sum by (deployment_id) (rate(vllm_request_errors_total[5m]))
-          / sum by (deployment_id) (rate(vllm_requests_total[5m])) > 0.05
-        for: 10m
-        labels:
-          severity: warning
-        annotations:
-          summary: "服务 {{ $labels.deployment_id }} 错误率超 SLO"
-          description: "错误率超过 5% 持续 10 分钟"
-
-      # TTFT 超 SLO：P95 > 2s 持续 10 分钟
-      - alert: HighTTFT
-        expr: histogram_quantile(0.95, sum by (deployment_id, le) (rate(vllm_ttft_ms_bucket[10m]))) > 2000
-        for: 10m
-        labels:
-          severity: warning
-        annotations:
-          summary: "服务 {{ $labels.deployment_id }} TTFT 超 SLO"
-          description: "P95 TTFT 超过 2s 持续 10 分钟"
-
-      # GPU 利用率过高：>95% 持续 15 分钟（可能排队）
-      - alert: GPUUtilizationHigh
-        expr: avg by (instance) (dcgm_gpu_utilization) > 95
-        for: 15m
-        labels:
-          severity: warning
-        annotations:
-          summary: "GPU {{ $labels.instance }} 利用率过高"
-          description: "GPU 利用率超过 95% 持续 15 分钟，可能存在排队"
-
-      # GPU 显存不足：剩余 < 5% 持续 10 分钟
-      - alert: GPUMemoryLow
-        expr: (dcgm_fb_total - dcgm_fb_used) / dcgm_fb_total < 0.05
-        for: 10m
-        labels:
-          severity: warning
-        annotations:
-          summary: "GPU {{ $labels.instance }} 显存不足"
-          description: "可用显存低于 5% 持续 10 分钟"
-
-      # 副本就绪数低于期望
-      - alert: ReplicasUnavailable
-        expr: kube_deployment_status_replicas_available < kube_deployment_spec_replicas
-        for: 5m
-        labels:
-          severity: critical
-        annotations:
-          summary: "部署 {{ $labels.deployment }} 副本不足"
-          description: "可用副本数低于期望值持续 5 分钟"
-
-      # 部署失败（平台状态）
-      - alert: DeploymentFailed
-        expr: carrot_deployment_status{status="FAILED"} == 1
-        for: 1m
-        labels:
-          severity: critical
-        annotations:
-          summary: "部署 {{ $labels.deployment }} 失败"
-          description: "模型服务进入 FAILED 状态，请查看部署事件与 Pod 诊断"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-alert-rules
+  namespace: monitoring
+data:
+  alerts.yml: |
+    groups:
+      - name: carrot-inference-guards
+        rules:
+          - alert: HighInferenceErrorRate
+            expr: sum by (tenant_id, deployment_id) (rate(carrot_inference_errors_total[5m])) / clamp_min(sum by (tenant_id, deployment_id) (rate(carrot_inference_requests_total[5m])), 0.001) > 0.05
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "部署 {{ $labels.deployment_id }} 错误率超过 5%"
+          - alert: HighInferenceTTFT
+            expr: avg_over_time(carrot_inference_ttft_ms[10m]) > 2000
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "部署 {{ $labels.deployment_id }} TTFT 超过 2 秒"
+          - alert: HighInferenceTPOT
+            expr: avg_over_time(carrot_inference_tpot_ms[10m]) > 100
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "部署 {{ $labels.deployment_id }} TPOT 持续偏高"
+          - alert: InferenceQueueBacklog
+            expr: max_over_time(carrot_inference_queue_length[5m]) > 20
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "部署 {{ $labels.deployment_id }} 队列持续积压"
+          - alert: KVCachePressure
+            expr: max_over_time(carrot_inference_kv_cache_usage_ratio[10m]) > 0.90
+            for: 10m
+            labels:
+              severity: warning
+            annotations:
+              summary: "部署 {{ $labels.deployment_id }} KV cache 使用率超过 90%"
+          - alert: GPUUtilizationHigh
+            expr: avg by (instance) (dcgm_gpu_utilization) > 95
+            for: 15m
+            labels:
+              severity: warning
+            annotations:
+              summary: "GPU {{ $labels.instance }} 利用率超过 95%"

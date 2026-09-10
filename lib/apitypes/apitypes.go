@@ -16,9 +16,9 @@ type Response struct {
 
 // 分页
 type Page struct {
-	Total int64 `json:"total"`
-	Limit int   `json:"limit"`
-	Offset int  `json:"offset"`
+	Total  int64 `json:"total"`
+	Limit  int   `json:"limit"`
+	Offset int   `json:"offset"`
 }
 
 // ---- 模型 ----
@@ -29,14 +29,15 @@ type CreateModelRequest struct {
 }
 
 type CreateModelVersionRequest struct {
-	Version       string   `json:"version" binding:"required"`
-	ArtifactURI   string   `json:"artifactUri" binding:"required"` // 权重地址
-	Runtime       string   `json:"runtime"`                        // 默认 vLLM
-	GPUType       string   `json:"gpuType" binding:"required"`
-	GPUCount      int32    `json:"gpuCount" binding:"required"`
-	MemoryMB      int64    `json:"memoryMB" binding:"required"`
-	ContextLength int32    `json:"contextLength"`
-	StartupArgs   []string `json:"startupArgs"`
+	Version        string   `json:"version" binding:"required"`
+	ArtifactURI    string   `json:"artifactUri" binding:"required"` // 权重地址
+	ArtifactDigest string   `json:"artifactDigest"`                 // 可选 sha256:<hex>，校验时强制比对
+	Runtime        string   `json:"runtime"`                        // 默认 vLLM
+	GPUType        string   `json:"gpuType" binding:"required"`
+	GPUCount       int32    `json:"gpuCount" binding:"required"`
+	MemoryMB       int64    `json:"memoryMB" binding:"required"`
+	ContextLength  int32    `json:"contextLength"`
+	StartupArgs    []string `json:"startupArgs"`
 }
 
 type ModelVersionView struct {
@@ -44,7 +45,7 @@ type ModelVersionView struct {
 }
 
 type ModelWithVersions struct {
-	Model    domain.Model       `json:"model"`
+	Model    domain.Model          `json:"model"`
 	Versions []domain.ModelVersion `json:"versions"`
 }
 
@@ -52,12 +53,12 @@ type ModelWithVersions struct {
 
 type CreateDeploymentRequest struct {
 	// IdempotencyKey 幂等键：客户端生成，重复提交返回同一部署
-	IdempotencyKey string `json:"idempotencyKey" binding:"required"`
-	Name           string `json:"name" binding:"required"`
-	ModelVersionID string `json:"modelVersionId" binding:"required"`
-	TenantID       string `json:"tenantId"` // 默认 default
-	Namespace      string `json:"namespace"` // 默认 tenant-<id>
-	Replicas       int32  `json:"replicas"` // 默认 1
+	IdempotencyKey string   `json:"idempotencyKey" binding:"required"`
+	Name           string   `json:"name" binding:"required"`
+	ModelVersionID string   `json:"modelVersionId" binding:"required"`
+	TenantID       string   `json:"tenantId"`  // 默认 default
+	Namespace      string   `json:"namespace"` // 默认 tenant-<id>
+	Replicas       int32    `json:"replicas"`  // 默认 1
 	StartupArgs    []string `json:"startupArgs"`
 }
 
@@ -72,9 +73,9 @@ type DeploymentView struct {
 }
 
 type PodStatusView struct {
-	Ready     int32  `json:"ready"`
-	Desired   int32  `json:"desired"`
-	Available int32  `json:"available"`
+	Ready     int32 `json:"ready"`
+	Desired   int32 `json:"desired"`
+	Available int32 `json:"available"`
 }
 
 type EventView struct {
@@ -87,8 +88,8 @@ type EventView struct {
 // ---- 资源 ----
 
 type GPUResourcesView struct {
-	Summary domain.GPUSummary       `json:"summary"`
-	Nodes   []domain.GPUResource    `json:"nodes"`
+	Summary domain.GPUSummary    `json:"summary"`
+	Nodes   []domain.GPUResource `json:"nodes"`
 }
 
 // ---- 指标 ----
@@ -105,6 +106,6 @@ type MetricSeries struct {
 }
 
 type MetricPoint struct {
-	Ts   int64   `json:"ts"`
-	Val  float64 `json:"val"`
+	Ts  int64   `json:"ts"`
+	Val float64 `json:"val"`
 }

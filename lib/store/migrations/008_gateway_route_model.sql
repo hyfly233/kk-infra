@@ -1,0 +1,1 @@
+ALTER TABLE gateway_routes ADD COLUMN IF NOT EXISTS model_id TEXT NOT NULL DEFAULT '';

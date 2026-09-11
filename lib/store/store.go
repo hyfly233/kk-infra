@@ -24,6 +24,8 @@ func MigrateAll(db *sql.DB) error {
 		"migrations/004_identity.sql",
 		"migrations/005_tenants.sql",
 		"migrations/007_usage_billing.sql",
+		"migrations/008_gateway_route_model.sql",
+		"migrations/009_artifact_metadata.sql",
 	})
 }
 

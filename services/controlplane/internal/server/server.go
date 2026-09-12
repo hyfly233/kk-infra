@@ -3,6 +3,7 @@ package server
 
 import (
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -84,6 +85,9 @@ func (s *Server) Handler() http.Handler {
 
 	// 审计日志（R2-4）
 	mux.HandleFunc("GET /api/v1/audit", s.handleListAudit)
+	mux.HandleFunc("GET /api/v1/billing", s.handleBilling)
+	mux.HandleFunc("GET /api/v1/billing.csv", s.handleBillingCSV)
+	mux.HandleFunc("PUT /api/v1/rate-cards/{tenantId}", s.handleSetRateCard)
 
 	base := http.Handler(mux)
 	if s.identity != nil {
@@ -94,6 +98,67 @@ func (s *Server) Handler() http.Handler {
 			middleware.AccessLog(s.logger, base),
 		),
 	)
+}
+
+func (s *Server) billingRows(w http.ResponseWriter, r *http.Request) ([]clients.DailyUsage, bool) {
+	if s.observability == nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrIllegalState, "observability 未配置"))
+		return nil, false
+	}
+	tenant := r.URL.Query().Get("tenantId")
+	if claims := claimsFrom(r.Context()); claims != nil && claims.Role != platformauth.RolePlatformAdmin {
+		tenant = claims.TenantID
+	}
+	if tenant == "" {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, "tenantId 必填"))
+		return nil, false
+	}
+	rows, err := s.observability.Billing(r.Context(), tenant, r.URL.Query().Get("from"), r.URL.Query().Get("to"))
+	if err != nil {
+		apitypes.WriteResult(w, r, nil, err)
+		return nil, false
+	}
+	return rows, true
+}
+func (s *Server) handleBilling(w http.ResponseWriter, r *http.Request) {
+	rows, ok := s.billingRows(w, r)
+	if ok {
+		apitypes.WriteResult(w, r, rows, nil)
+	}
+}
+func (s *Server) handleBillingCSV(w http.ResponseWriter, r *http.Request) {
+	rows, ok := s.billingRows(w, r)
+	if !ok {
+		return
+	}
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", "attachment; filename=billing.csv")
+	writer := csv.NewWriter(w)
+	_ = writer.Write([]string{"date", "tenant_id", "deployment_id", "input_tokens", "output_tokens", "requests", "failed", "gpu_replica_seconds", "estimated_cost"})
+	for _, row := range rows {
+		_ = writer.Write([]string{row.Date.Format("2006-01-02"), row.TenantID, row.DeploymentID, strconv.FormatInt(row.InputTokens, 10), strconv.FormatInt(row.OutputTokens, 10), strconv.FormatInt(row.RequestCount, 10), strconv.FormatInt(row.FailedCount, 10), strconv.FormatInt(row.GPUReplicaSeconds, 10), strconv.FormatFloat(row.EstimatedCost, 'f', 6, 64)})
+	}
+	writer.Flush()
+}
+func (s *Server) handleSetRateCard(w http.ResponseWriter, r *http.Request) {
+	if !requirePlatformAdmin(w, r) {
+		return
+	}
+	if s.observability == nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrIllegalState, "observability 未配置"))
+		return
+	}
+	var card clients.RateCard
+	if err := json.NewDecoder(r.Body).Decode(&card); err != nil {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, "请求体解析失败"))
+		return
+	}
+	card.TenantID = r.PathValue("tenantId")
+	if err := s.observability.SetRateCard(r.Context(), card.TenantID, card); err != nil {
+		apitypes.WriteResult(w, r, nil, err)
+		return
+	}
+	apitypes.WriteResult(w, r, card, nil)
 }
 
 type claimsContextKey struct{}
@@ -220,7 +285,7 @@ func (s *Server) requireTenantAdmin(w http.ResponseWriter, r *http.Request, tena
 
 func requirePlatformAdmin(w http.ResponseWriter, r *http.Request) bool {
 	claims := claimsFrom(r.Context())
-	if claims == nil || claims.Role != platformauth.RolePlatformAdmin {
+	if claims != nil && claims.Role != platformauth.RolePlatformAdmin {
 		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "需要平台管理员权限"))
 		return false
 	}

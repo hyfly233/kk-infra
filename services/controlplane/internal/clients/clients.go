@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 
 	"kk-infra/lib/apitypes"
@@ -89,6 +90,25 @@ type ObservabilityClient struct {
 	*HTTPClient
 }
 
+type RateCard struct {
+	TenantID              string  `json:"tenantId"`
+	GPUType               string  `json:"gpuType"`
+	InputTokenPerMillion  float64 `json:"inputTokenPerMillion"`
+	OutputTokenPerMillion float64 `json:"outputTokenPerMillion"`
+	GPUHour               float64 `json:"gpuHour"`
+}
+type DailyUsage struct {
+	Date              time.Time `json:"date"`
+	TenantID          string    `json:"tenantId"`
+	DeploymentID      string    `json:"deploymentId"`
+	InputTokens       int64     `json:"inputTokens"`
+	OutputTokens      int64     `json:"outputTokens"`
+	RequestCount      int64     `json:"requestCount"`
+	FailedCount       int64     `json:"failedCount"`
+	GPUReplicaSeconds int64     `json:"gpuReplicaSeconds"`
+	EstimatedCost     float64   `json:"estimatedCost"`
+}
+
 // NewObservabilityClient 创建客户端
 func NewObservabilityClient(baseURL string) *ObservabilityClient {
 	return &ObservabilityClient{NewHTTPClient(baseURL)}
@@ -107,6 +127,24 @@ func (c *ObservabilityClient) DeploymentMetrics(ctx context.Context, deploymentI
 	return &v, nil
 }
 
+func (c *ObservabilityClient) SetRateCard(ctx context.Context, tenantID string, card RateCard) error {
+	return c.do(ctx, http.MethodPut, "/internal/rate-cards/"+url.PathEscape(tenantID), card, nil)
+}
+func (c *ObservabilityClient) Billing(ctx context.Context, tenantID, from, to string) ([]DailyUsage, error) {
+	q := url.Values{"tenantId": {tenantID}}
+	if from != "" {
+		q.Set("from", from)
+	}
+	if to != "" {
+		q.Set("to", to)
+	}
+	var rows []DailyUsage
+	if err := c.do(ctx, http.MethodGet, "/internal/billing?"+q.Encode(), nil, &rows); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
 // ---- gateway 客户端 ----
 
 // GatewayClient 管理模型到服务端点的内部路由。
@@ -120,9 +158,9 @@ func NewGatewayClient(baseURL string) *GatewayClient {
 }
 
 // RegisterRoute 注册或更新可调用模型路由。
-func (c *GatewayClient) RegisterRoute(ctx context.Context, model, endpoint, tenantID, deploymentID string) error {
+func (c *GatewayClient) RegisterRoute(ctx context.Context, model, modelID, endpoint, tenantID, deploymentID string) error {
 	body := map[string]string{
-		"model": model, "endpoint": endpoint, "tenantId": tenantID, "deploymentId": deploymentID,
+		"model": model, "modelId": modelID, "endpoint": endpoint, "tenantId": tenantID, "deploymentId": deploymentID,
 	}
 	return c.do(ctx, http.MethodPost, "/internal/routes", body, nil)
 }

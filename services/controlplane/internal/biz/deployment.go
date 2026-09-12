@@ -31,7 +31,7 @@ type K8sClient interface {
 
 // GatewayClient 管理部署完成后的推理路由。
 type GatewayClient interface {
-	RegisterRoute(ctx context.Context, model, endpoint, tenantID, deploymentID string) error
+	RegisterRoute(ctx context.Context, model, modelID, endpoint, tenantID, deploymentID string) error
 	UnregisterRoute(ctx context.Context, model string) error
 }
 type TenantState interface{ TenantActive(tenantID string) bool }
@@ -568,7 +568,7 @@ func (uc *DeploymentUseCase) SyncFromK8s(ctx context.Context, id string) {
 			uc.transition(id, d.Status, domain.DeploymentStatusRunning, "Pod 就绪")
 		}
 		if uc.gateway != nil && d.Endpoint != "" {
-			if err := uc.gateway.RegisterRoute(ctx, d.Name, d.Endpoint, d.TenantID, d.ID); err != nil {
+			if err := uc.gateway.RegisterRoute(ctx, d.Name, d.ModelID, d.Endpoint, d.TenantID, d.ID); err != nil {
 				uc.failDeployment(id, "注册网关路由失败: "+err.Error())
 			}
 		}

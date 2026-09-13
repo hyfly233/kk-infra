@@ -20,7 +20,7 @@ import (
 
 // MetricsSink 指标上报接口（observability 注入，nil 可跳过）
 type MetricsSink interface {
-	Record(tenantID, deploymentID, model string, latencyMs int64, ttftMs int64, tokens int, err bool)
+	Record(tenantID, deploymentID, model string, latencyMs int64, ttftMs int64, inputTokens, outputTokens int, err bool)
 }
 
 // AuthorizeFunc 模型授权回调（R2-4：API Key 模型白名单）。
@@ -90,6 +90,15 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, tenantID string)
 		writeErr(w, http.StatusBadRequest, "model 字段必填")
 		return
 	}
+	if chat.Stream {
+		var payload map[string]interface{}
+		if json.Unmarshal(raw, &payload) == nil {
+			payload["stream_options"] = map[string]bool{"include_usage": true}
+			if encoded, encodeErr := json.Marshal(payload); encodeErr == nil {
+				raw = encoded
+			}
+		}
+	}
 
 	// R2-4：模型授权（API Key 白名单）
 	if p.authorize != nil {
@@ -135,7 +144,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, tenantID string)
 	upResp, err := p.client.Do(upReq)
 	if err != nil {
 		p.logger.Error("上游请求失败", "model", chat.Model, "err", err)
-		p.record(route, start, 0, 0, 0, true)
+		p.record(route, start, 0, 0, 0, 0, true)
 		writeErr(w, http.StatusBadGateway, "模型服务不可达")
 		return
 	}
@@ -144,7 +153,7 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, tenantID string)
 	// 非 2xx：透传错误
 	if upResp.StatusCode < 200 || upResp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(upResp.Body, 64<<10))
-		p.record(route, start, 0, 0, 0, true)
+		p.record(route, start, 0, 0, 0, 0, true)
 		p.logger.Error("上游返回错误", "model", chat.Model, "status", upResp.StatusCode, "body", truncate(string(body), 200))
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadGateway)
@@ -165,22 +174,28 @@ func (p *Proxy) Forward(w http.ResponseWriter, r *http.Request, tenantID string)
 func (p *Proxy) forwardNonStream(w http.ResponseWriter, upResp *http.Response, route *router.Route, start time.Time) {
 	body, err := io.ReadAll(io.LimitReader(upResp.Body, 4<<20))
 	if err != nil {
-		p.record(route, start, 0, 0, 0, true)
+		p.record(route, start, 0, 0, 0, 0, true)
 		writeErr(w, http.StatusBadGateway, "读取上游响应失败")
 		return
 	}
 	// 统计 token（尽力解析）
-	tokens := int64(0)
+	inputTokens, outputTokens := int64(0), int64(0)
 	var usage struct {
 		Usage struct {
-			TotalTokens int `json:"total_tokens"`
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
 		} `json:"usage"`
 	}
 	if json.Unmarshal(body, &usage) == nil {
-		tokens = int64(usage.Usage.TotalTokens)
+		inputTokens = int64(usage.Usage.PromptTokens)
+		outputTokens = int64(usage.Usage.CompletionTokens)
+		if inputTokens == 0 && outputTokens == 0 {
+			outputTokens = int64(usage.Usage.TotalTokens)
+		}
 	}
 	latency := time.Since(start).Milliseconds()
-	p.record(route, start, latency, 0, tokens, false)
+	p.record(route, start, latency, 0, inputTokens, outputTokens, false)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -204,17 +219,28 @@ func (p *Proxy) forwardStream(w http.ResponseWriter, r *http.Request, upResp *ht
 	scanner := bufio.NewScanner(upResp.Body)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	firstChunk := true
-	tokens := int64(0)
+	inputTokens, outputTokens := int64(0), int64(0)
+	fallbackOutputTokens := int64(0)
+	ttftMs := int64(0)
 	for scanner.Scan() {
 		line := scanner.Text()
 		// 统计首 Token 时间与 token 数
 		if strings.HasPrefix(line, "data: ") {
 			data := strings.TrimPrefix(line, "data: ")
 			if data != "[DONE]" {
-				tokens++
+				fallbackOutputTokens++
+				var chunk struct {
+					Usage *struct {
+						PromptTokens     int `json:"prompt_tokens"`
+						CompletionTokens int `json:"completion_tokens"`
+					} `json:"usage"`
+				}
+				if json.Unmarshal([]byte(data), &chunk) == nil && chunk.Usage != nil {
+					inputTokens = int64(chunk.Usage.PromptTokens)
+					outputTokens = int64(chunk.Usage.CompletionTokens)
+				}
 				if firstChunk {
-					ttft := time.Since(start).Milliseconds()
-					p.record(route, start, 0, ttft, 0, false)
+					ttftMs = time.Since(start).Milliseconds()
 					firstChunk = false
 				}
 			}
@@ -222,17 +248,26 @@ func (p *Proxy) forwardStream(w http.ResponseWriter, r *http.Request, upResp *ht
 		_, _ = fmt.Fprintf(w, "%s\n", line)
 		flusher.Flush()
 	}
+	streamFailed := false
 	if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
 		p.logger.Error("流式读取上游失败", "model", route.Model, "err", err)
+		streamFailed = true
+	}
+	if outputTokens == 0 {
+		outputTokens = fallbackOutputTokens
 	}
 	latency := time.Since(start).Milliseconds()
-	p.record(route, start, latency, 0, tokens, false)
+	p.record(route, start, latency, ttftMs, inputTokens, outputTokens, streamFailed)
 }
 
 // record 指标上报
-func (p *Proxy) record(route *router.Route, start time.Time, latencyMs, ttftMs, tokens int64, err bool) {
+func (p *Proxy) record(route *router.Route, start time.Time, latencyMs, ttftMs, inputTokens, outputTokens int64, err bool) {
 	if p.metrics != nil {
-		p.metrics.Record(route.TenantID, route.DeploymentID, route.Model, latencyMs, ttftMs, int(tokens), err)
+		modelID := route.ModelID
+		if modelID == "" {
+			modelID = route.Model
+		}
+		p.metrics.Record(route.TenantID, route.DeploymentID, modelID, latencyMs, ttftMs, int(inputTokens), int(outputTokens), err)
 	}
 }
 

@@ -12,7 +12,8 @@ var ErrRouteNotFound = errors.New("model route not found")
 
 // Route 路由条目
 type Route struct {
-	Model        string `json:"model"`    // 模型名（= 部署服务名）
+	Model        string `json:"model"` // 模型名（= 部署服务名）
+	ModelID      string `json:"modelId"`
 	Endpoint     string `json:"endpoint"` // 后端 base URL（如 http://qwen-demo:80）
 	TenantID     string `json:"tenantId"` // 归属租户
 	DeploymentID string `json:"deploymentId"`

@@ -11,7 +11,7 @@ type PostgresStore struct{ db *sql.DB }
 func NewPostgresStore(db *sql.DB) *PostgresStore { return &PostgresStore{db: db} }
 
 func (s *PostgresStore) LoadRoutes(ctx context.Context) ([]*Route, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT model, endpoint, tenant_id, deployment_id FROM gateway_routes`)
+	rows, err := s.db.QueryContext(ctx, `SELECT model, model_id, endpoint, tenant_id, deployment_id FROM gateway_routes`)
 	if err != nil {
 		return nil, err
 	}
@@ -19,7 +19,7 @@ func (s *PostgresStore) LoadRoutes(ctx context.Context) ([]*Route, error) {
 	var routes []*Route
 	for rows.Next() {
 		route := &Route{}
-		if err := rows.Scan(&route.Model, &route.Endpoint, &route.TenantID, &route.DeploymentID); err != nil {
+		if err := rows.Scan(&route.Model, &route.ModelID, &route.Endpoint, &route.TenantID, &route.DeploymentID); err != nil {
 			return nil, err
 		}
 		routes = append(routes, route)
@@ -29,11 +29,11 @@ func (s *PostgresStore) LoadRoutes(ctx context.Context) ([]*Route, error) {
 
 func (s *PostgresStore) SaveRoute(ctx context.Context, route *Route) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO gateway_routes (model, endpoint, tenant_id, deployment_id)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (model) DO UPDATE SET endpoint = EXCLUDED.endpoint, tenant_id = EXCLUDED.tenant_id,
+		INSERT INTO gateway_routes (model, model_id, endpoint, tenant_id, deployment_id)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (model) DO UPDATE SET model_id = EXCLUDED.model_id, endpoint = EXCLUDED.endpoint, tenant_id = EXCLUDED.tenant_id,
 		deployment_id = EXCLUDED.deployment_id, updated_at = now()`,
-		route.Model, route.Endpoint, route.TenantID, route.DeploymentID)
+		route.Model, route.ModelID, route.Endpoint, route.TenantID, route.DeploymentID)
 	return err
 }
 

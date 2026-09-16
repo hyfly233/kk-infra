@@ -108,6 +108,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 type registerRouteReq struct {
 	Model        string `json:"model"`
+	ModelID      string `json:"modelId"`
 	Endpoint     string `json:"endpoint"`
 	TenantID     string `json:"tenantId"`
 	DeploymentID string `json:"deploymentId"`
@@ -121,6 +122,7 @@ func (s *Server) handleRegisterRoute(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.routes.Register(r.Context(), &router.Route{
 		Model:        req.Model,
+		ModelID:      req.ModelID,
 		Endpoint:     req.Endpoint,
 		TenantID:     req.TenantID,
 		DeploymentID: req.DeploymentID,

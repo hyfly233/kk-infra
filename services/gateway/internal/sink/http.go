@@ -29,14 +29,15 @@ func NewHTTPSink(baseURL string, logger *slog.Logger) *HTTPSink {
 }
 
 // Record 上报一条请求指标（异步，不阻塞调用方）。
-func (h *HTTPSink) Record(tenantID, deploymentID, model string, latencyMs int64, ttftMs int64, tokens int, err bool) {
+func (h *HTTPSink) Record(tenantID, deploymentID, model string, latencyMs int64, ttftMs int64, inputTokens, outputTokens int, err bool) {
 	payload := map[string]any{
 		"tenantId":     tenantID,
 		"deploymentId": deploymentID,
 		"model":        model,
 		"latencyMs":    latencyMs,
 		"ttftMs":       ttftMs,
-		"tokens":       tokens,
+		"inputTokens":  inputTokens,
+		"outputTokens": outputTokens,
 		"err":          err,
 	}
 	body, jerr := json.Marshal(payload)

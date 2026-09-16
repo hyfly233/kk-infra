@@ -31,8 +31,8 @@ type proxyMetric struct {
 	err          bool
 }
 
-func (m *mockMetrics) Record(_ string, deploymentID, model string, latencyMs, ttftMs int64, tokens int, err bool) {
-	m.records = append(m.records, proxyMetric{deploymentID, model, latencyMs, ttftMs, tokens, err})
+func (m *mockMetrics) Record(_ string, deploymentID, model string, latencyMs, ttftMs int64, inputTokens, outputTokens int, err bool) {
+	m.records = append(m.records, proxyMetric{deploymentID, model, latencyMs, ttftMs, inputTokens + outputTokens, err})
 }
 
 // fakeUpstream 模拟上游 vLLM（非流式 + 流式），带模拟 TTFT 延迟

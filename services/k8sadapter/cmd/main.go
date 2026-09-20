@@ -23,6 +23,8 @@ func main() {
 	kubeconfig := flag.String("kubeconfig", "", "真实集群 kubeconfig 路径（默认 ~/.kube/config）")
 	virtualGPUs := flag.String("virtual-gpus", "", "虚拟 GPU 池配置（无 GPU 集群用），格式: node:gpuType:count:memMB:util:health;...")
 	deployImage := flag.String("deploy-image", "", "部署使用的模型镜像（默认 vllm/vllm-openai:latest）")
+	kedaEnabled := flag.Bool("keda-enabled", false, "为每个真实部署创建 KEDA ScaledObject（要求集群已安装 KEDA）")
+	prometheusURL := flag.String("prometheus-url", "http://prometheus.monitoring.svc.cluster.local:9090", "KEDA 查询的 Prometheus 地址")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -37,6 +39,7 @@ func main() {
 			logger.Error("创建真实 K8s 客户端失败", "err", err)
 			os.Exit(1)
 		}
+		real.ConfigureKEDA(*kedaEnabled, *prometheusURL)
 		kube = real
 		if *virtualGPUs != "" {
 			logger.Info("k8sadapter 使用真实集群 + 虚拟 GPU 池", "virtualGPUs", *virtualGPUs)

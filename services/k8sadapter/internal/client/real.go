@@ -23,14 +23,22 @@ import (
 // 直接调用 K8s REST API（不引入 client-go 重依赖），
 // 通过 kubeconfig 认证。无 GPU 节点时可用虚拟 GPU 池（配置注入）做资源校验。
 type RealKubeClient struct {
-	baseURL    string       // https://<apiserver>
+	baseURL    string // https://<apiserver>
 	httpClient *http.Client
-	namespace  string       // 默认命名空间（部署请求未指定时）
-	token      string       // bearer token（kubeconfig）
+	namespace  string // 默认命名空间（部署请求未指定时）
+	token      string // bearer token（kubeconfig）
 	// 虚拟 GPU 池配置（Docker Desktop 等无 GPU 环境使用）
 	virtualGPUs []FakeNodeConfig
 	// 部署镜像（vLLM 或 mock；由环境变量注入便于无 GPU 验证）
-	deployImage string
+	deployImage   string
+	kedaEnabled   bool
+	prometheusURL string
+}
+
+// ConfigureKEDA controls dynamic ScaledObject reconciliation for real clusters.
+func (c *RealKubeClient) ConfigureKEDA(enabled bool, prometheusURL string) {
+	c.kedaEnabled = enabled
+	c.prometheusURL = strings.TrimRight(prometheusURL, "/")
 }
 
 // KubeConfig kubeconfig 结构（子集）
@@ -128,10 +136,10 @@ func NewRealKubeClient(kubeconfigPath, virtualGPUConfig, deployImage string) (*R
 	}
 
 	return &RealKubeClient{
-		baseURL:    server,
-		httpClient: &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}, Timeout: 30 * time.Second},
-		namespace:  "default",
-		token:      token,
+		baseURL:     server,
+		httpClient:  &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg}, Timeout: 30 * time.Second},
+		namespace:   "default",
+		token:       token,
 		virtualGPUs: parseVirtualGPUConfig(virtualGPUConfig),
 		deployImage: deployImage,
 	}, nil

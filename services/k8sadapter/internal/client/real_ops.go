@@ -194,6 +194,9 @@ func (c *RealKubeClient) CreateDeployment(ctx context.Context, spec *DeploymentS
 
 	// 幂等：已存在则直接返回状态
 	if _, err := c.GetDeployment(ctx, spec.Name, ns); err == nil {
+		if err := c.reconcileScaledObject(ctx, spec, ns); err != nil {
+			return nil, err
+		}
 		return c.GetDeployment(ctx, spec.Name, ns)
 	}
 
@@ -203,6 +206,9 @@ func (c *RealKubeClient) CreateDeployment(ctx context.Context, spec *DeploymentS
 	}
 	// 创建 Service（幂等：已存在则忽略）
 	_ = c.do(ctx, "POST", "/api/v1/namespaces/"+ns+"/services", res.Service, nil)
+	if err := c.reconcileScaledObject(ctx, spec, ns); err != nil {
+		return nil, err
+	}
 
 	return c.GetDeployment(ctx, spec.Name, ns)
 }
@@ -230,6 +236,9 @@ func (c *RealKubeClient) UpdateDeployment(ctx context.Context, spec *DeploymentS
 	}
 	if err := c.do(ctx, "PATCH", "/apis/apps/v1/namespaces/"+ns+"/deployments/"+spec.Name, patch, nil); err != nil {
 		return nil, fmt.Errorf("更新 Deployment 失败: %w", err)
+	}
+	if err := c.reconcileScaledObject(ctx, spec, ns); err != nil {
+		return nil, err
 	}
 	return c.GetDeployment(ctx, spec.Name, ns)
 }
@@ -376,6 +385,46 @@ func (c *RealKubeClient) DeleteDeployment(ctx context.Context, name, namespace s
 	}
 	// Service 一并删除（忽略不存在）
 	_ = c.do(ctx, "DELETE", "/api/v1/namespaces/"+ns+"/services/"+name, nil, nil)
+	if c.kedaEnabled {
+		_ = c.do(ctx, "DELETE", "/apis/keda.sh/v1alpha1/namespaces/"+ns+"/scaledobjects/"+name, nil, nil)
+	}
+	return nil
+}
+
+func (c *RealKubeClient) reconcileScaledObject(ctx context.Context, spec *DeploymentSpec, namespace string) error {
+	if !c.kedaEnabled {
+		return nil
+	}
+	if c.prometheusURL == "" {
+		return fmt.Errorf("KEDA 已启用但 prometheus-url 为空")
+	}
+	tenantID := spec.Labels["carrot.ai/tenant-id"]
+	labels := fmt.Sprintf(`tenant_id="%s",deployment_id="%s"`, tenantID, spec.DeploymentID)
+	object := map[string]interface{}{
+		"apiVersion": "keda.sh/v1alpha1", "kind": "ScaledObject",
+		"metadata": map[string]interface{}{"name": spec.Name, "namespace": namespace, "labels": spec.Labels},
+		"spec": map[string]interface{}{
+			"scaleTargetRef": map[string]string{"name": spec.Name}, "minReplicaCount": 1, "maxReplicaCount": 8, "pollingInterval": 15, "cooldownPeriod": 300,
+			"advanced": map[string]interface{}{"horizontalPodAutoscalerConfig": map[string]interface{}{"behavior": map[string]interface{}{"scaleDown": map[string]interface{}{"stabilizationWindowSeconds": 300}}}},
+			"triggers": []map[string]interface{}{
+				{"type": "prometheus", "metadata": map[string]string{"serverAddress": c.prometheusURL, "metricName": "carrot_inference_qps", "query": fmt.Sprintf(`sum(rate(carrot_inference_requests_total{%s}[2m]))`, labels), "threshold": "5"}},
+				{"type": "prometheus", "metadata": map[string]string{"serverAddress": c.prometheusURL, "metricName": "carrot_inference_queue_length", "query": fmt.Sprintf(`max(carrot_inference_queue_length{%s})`, labels), "threshold": "10"}},
+			},
+		},
+	}
+	path := "/apis/keda.sh/v1alpha1/namespaces/" + namespace + "/scaledobjects/" + spec.Name
+	var existing interface{}
+	if err := c.do(ctx, "GET", path, nil, &existing); err == nil {
+		if err := c.do(ctx, "PATCH", path, object, nil); err != nil {
+			return fmt.Errorf("更新 KEDA ScaledObject 失败: %w", err)
+		}
+		return nil
+	} else if err != ErrNotFound {
+		return fmt.Errorf("查询 KEDA ScaledObject 失败: %w", err)
+	}
+	if err := c.do(ctx, "POST", "/apis/keda.sh/v1alpha1/namespaces/"+namespace+"/scaledobjects", object, nil); err != nil {
+		return fmt.Errorf("创建 KEDA ScaledObject 失败（请确认 KEDA CRD 已安装）: %w", err)
+	}
 	return nil
 }
 

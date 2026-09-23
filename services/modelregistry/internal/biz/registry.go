@@ -2,6 +2,7 @@
 package biz
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"time"
@@ -9,17 +10,23 @@ import (
 	"kk-infra/lib/apitypes"
 	"kk-infra/lib/domain"
 	"kk-infra/lib/errcode"
+	"kk-infra/services/modelregistry/internal/artifact"
 	"kk-infra/services/modelregistry/internal/data"
 )
 
 // Registry 模型注册业务
 type Registry struct {
-	repo data.Repository
+	repo      data.Repository
+	artifacts artifact.Verifier
 }
 
 // NewRegistry 创建业务对象
-func NewRegistry(repo data.Repository) *Registry {
-	return &Registry{repo: repo}
+func NewRegistry(repo data.Repository, verifiers ...artifact.Verifier) *Registry {
+	verifier := artifact.Verifier(artifact.DevelopmentVerifier{})
+	if len(verifiers) > 0 && verifiers[0] != nil {
+		verifier = verifiers[0]
+	}
+	return &Registry{repo: repo, artifacts: verifier}
 }
 
 // newID 生成全局唯一 ID（crypto/rand，不依赖外部库）
@@ -67,6 +74,15 @@ func (r *Registry) ListModels() ([]*domain.Model, error) {
 
 // DeleteModel 删除模型（级联删除版本）
 func (r *Registry) DeleteModel(id string) error {
+	versions, err := r.repo.ListVersions(id)
+	if err != nil {
+		return data.ToErrCode(err)
+	}
+	for _, version := range versions {
+		if err := r.ensureVersionDeletable(version); err != nil {
+			return err
+		}
+	}
 	if err := r.repo.DeleteModel(id); err != nil {
 		return data.ToErrCode(err)
 	}
@@ -81,6 +97,9 @@ func (r *Registry) CreateVersion(modelID string, req *apitypes.CreateModelVersio
 	if req.Version == "" || req.ArtifactURI == "" || req.GPUType == "" || req.GPUCount <= 0 {
 		return nil, errcode.New(errcode.ErrBadRequest, "版本号/权重地址/GPU 类型/GPU 数量必填")
 	}
+	if _, _, err := artifact.ParseS3URI(req.ArtifactURI); err != nil {
+		return nil, errcode.New(errcode.ErrBadRequest, err.Error())
+	}
 	runtime := req.Runtime
 	if runtime == "" {
 		runtime = domain.RuntimeVLLM
@@ -90,18 +109,20 @@ func (r *Registry) CreateVersion(modelID string, req *apitypes.CreateModelVersio
 	}
 	now := time.Now()
 	v := &domain.ModelVersion{
-		ID:            newID("v"),
-		ModelID:       modelID,
-		Version:       req.Version,
-		ArtifactURI:   req.ArtifactURI,
-		Runtime:       runtime,
-		GPUType:       req.GPUType,
-		GPUCount:      req.GPUCount,
-		MemoryMB:      req.MemoryMB,
-		ContextLength: req.ContextLength,
-		Status:        domain.ModelStatusRegistered,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		ID:             newID("v"),
+		ModelID:        modelID,
+		Version:        req.Version,
+		ArtifactURI:    req.ArtifactURI,
+		ArtifactDigest: req.ArtifactDigest,
+		StorageType:    "s3",
+		Runtime:        runtime,
+		GPUType:        req.GPUType,
+		GPUCount:       req.GPUCount,
+		MemoryMB:       req.MemoryMB,
+		ContextLength:  req.ContextLength,
+		Status:         domain.ModelStatusRegistered,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 	if err := r.repo.CreateVersion(v); err != nil {
 		if err == data.ErrConflict {
@@ -134,7 +155,7 @@ func (r *Registry) ListVersions(modelID string) ([]*domain.ModelVersion, error) 
 }
 
 // ValidateVersion 标记版本校验通过（REGISTERED → VALIDATED）
-func (r *Registry) ValidateVersion(versionID string) (*domain.ModelVersion, error) {
+func (r *Registry) ValidateVersion(ctx context.Context, versionID string) (*domain.ModelVersion, error) {
 	v, err := r.repo.GetVersion(versionID)
 	if err != nil {
 		return nil, data.ToErrCode(err)
@@ -143,10 +164,20 @@ func (r *Registry) ValidateVersion(versionID string) (*domain.ModelVersion, erro
 		return nil, errcode.New(errcode.ErrIllegalState,
 			"版本状态为 "+v.Status+"，无法流转到 VALIDATED")
 	}
+	metadata, err := r.artifacts.Verify(ctx, v.ArtifactURI, v.ArtifactDigest)
+	if err != nil {
+		return nil, errcode.Wrap(errcode.ErrIllegalState, "artifact 校验失败", err)
+	}
+	if err := r.repo.UpdateArtifactMetadata(versionID, metadata.Digest, metadata.Size, metadata.VerifiedAt); err != nil {
+		return nil, data.ToErrCode(err)
+	}
 	if err := r.repo.UpdateVersionStatus(versionID, domain.ModelStatusValidated); err != nil {
 		return nil, data.ToErrCode(err)
 	}
 	v.Status = domain.ModelStatusValidated
+	v.ArtifactDigest = metadata.Digest
+	v.ArtifactSize = metadata.Size
+	v.ArtifactVerifiedAt = &metadata.VerifiedAt
 	return v, nil
 }
 
@@ -174,9 +205,22 @@ func (r *Registry) DeleteVersion(modelID, version string) error {
 	if err != nil {
 		return data.ToErrCode(err)
 	}
-	// 保护：可部署版本不允许直接删除（真实环境需检查部署引用，MVP 简化为状态保护）
-	if v.Status == domain.ModelStatusValidated {
-		return errcode.New(errcode.ErrIllegalState, "已校验通过的版本不可删除，请先下线关联服务")
+	if err := r.ensureVersionDeletable(v); err != nil {
+		return err
 	}
 	return data.ToErrCode(r.repo.DeleteVersion(v.ID))
+}
+
+func (r *Registry) ensureVersionDeletable(v *domain.ModelVersion) error {
+	referenced, err := r.repo.HasVersionReferences(v.ID)
+	if err != nil {
+		return data.ToErrCode(err)
+	}
+	if referenced {
+		return errcode.New(errcode.ErrIllegalState, "模型版本仍被部署引用")
+	}
+	if v.Status == domain.ModelStatusValidated || v.Status == domain.ModelStatusReleased {
+		return errcode.New(errcode.ErrIllegalState, "已校验或发布的版本不可删除，请先下线关联服务")
+	}
+	return nil
 }

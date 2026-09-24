@@ -91,10 +91,10 @@ func (r *PostgresRepository) DeleteModel(id string) error {
 
 func (r *PostgresRepository) CreateVersion(v *domain.ModelVersion) error {
 	_, err := r.db.Exec(
-		`INSERT INTO model_versions (id, model_id, version, artifact_uri, runtime, gpu_type, gpu_count, memory_mb, context_length, status, created_at, updated_at)
-		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-		v.ID, v.ModelID, v.Version, v.ArtifactURI, v.Runtime, v.GPUType, v.GPUCount,
-		v.MemoryMB, v.ContextLength, v.Status, v.CreatedAt, v.UpdatedAt,
+		`INSERT INTO model_versions (id, model_id, version, artifact_uri, artifact_digest, artifact_size, storage_type, runtime, gpu_type, gpu_count, memory_mb, context_length, status, created_at, updated_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+		v.ID, v.ModelID, v.Version, v.ArtifactURI, v.ArtifactDigest, v.ArtifactSize, v.StorageType,
+		v.Runtime, v.GPUType, v.GPUCount, v.MemoryMB, v.ContextLength, v.Status, v.CreatedAt, v.UpdatedAt,
 	)
 	return mapErr(err)
 }
@@ -102,9 +102,9 @@ func (r *PostgresRepository) CreateVersion(v *domain.ModelVersion) error {
 func (r *PostgresRepository) GetVersion(id string) (*domain.ModelVersion, error) {
 	v := &domain.ModelVersion{}
 	err := r.db.QueryRow(
-		`SELECT id, model_id, version, artifact_uri, runtime, gpu_type, gpu_count, memory_mb, context_length, status, created_at, updated_at
+		`SELECT id, model_id, version, artifact_uri, artifact_digest, artifact_size, storage_type, artifact_verified_at, runtime, gpu_type, gpu_count, memory_mb, context_length, status, created_at, updated_at
 		 FROM model_versions WHERE id=$1`, id,
-	).Scan(&v.ID, &v.ModelID, &v.Version, &v.ArtifactURI, &v.Runtime, &v.GPUType,
+	).Scan(&v.ID, &v.ModelID, &v.Version, &v.ArtifactURI, &v.ArtifactDigest, &v.ArtifactSize, &v.StorageType, &v.ArtifactVerifiedAt, &v.Runtime, &v.GPUType,
 		&v.GPUCount, &v.MemoryMB, &v.ContextLength, &v.Status, &v.CreatedAt, &v.UpdatedAt)
 	return v, mapErr(err)
 }
@@ -112,16 +112,16 @@ func (r *PostgresRepository) GetVersion(id string) (*domain.ModelVersion, error)
 func (r *PostgresRepository) GetVersionByModelAndVersion(modelID, version string) (*domain.ModelVersion, error) {
 	v := &domain.ModelVersion{}
 	err := r.db.QueryRow(
-		`SELECT id, model_id, version, artifact_uri, runtime, gpu_type, gpu_count, memory_mb, context_length, status, created_at, updated_at
+		`SELECT id, model_id, version, artifact_uri, artifact_digest, artifact_size, storage_type, artifact_verified_at, runtime, gpu_type, gpu_count, memory_mb, context_length, status, created_at, updated_at
 		 FROM model_versions WHERE model_id=$1 AND version=$2`, modelID, version,
-	).Scan(&v.ID, &v.ModelID, &v.Version, &v.ArtifactURI, &v.Runtime, &v.GPUType,
+	).Scan(&v.ID, &v.ModelID, &v.Version, &v.ArtifactURI, &v.ArtifactDigest, &v.ArtifactSize, &v.StorageType, &v.ArtifactVerifiedAt, &v.Runtime, &v.GPUType,
 		&v.GPUCount, &v.MemoryMB, &v.ContextLength, &v.Status, &v.CreatedAt, &v.UpdatedAt)
 	return v, mapErr(err)
 }
 
 func (r *PostgresRepository) ListVersions(modelID string) ([]*domain.ModelVersion, error) {
 	rows, err := r.db.Query(
-		`SELECT id, model_id, version, artifact_uri, runtime, gpu_type, gpu_count, memory_mb, context_length, status, created_at, updated_at
+		`SELECT id, model_id, version, artifact_uri, artifact_digest, artifact_size, storage_type, artifact_verified_at, runtime, gpu_type, gpu_count, memory_mb, context_length, status, created_at, updated_at
 		 FROM model_versions WHERE model_id=$1 ORDER BY created_at DESC`, modelID)
 	if err != nil {
 		return nil, mapErr(err)
@@ -130,13 +130,30 @@ func (r *PostgresRepository) ListVersions(modelID string) ([]*domain.ModelVersio
 	out := make([]*domain.ModelVersion, 0)
 	for rows.Next() {
 		v := &domain.ModelVersion{}
-		if err := rows.Scan(&v.ID, &v.ModelID, &v.Version, &v.ArtifactURI, &v.Runtime, &v.GPUType,
+		if err := rows.Scan(&v.ID, &v.ModelID, &v.Version, &v.ArtifactURI, &v.ArtifactDigest, &v.ArtifactSize, &v.StorageType, &v.ArtifactVerifiedAt, &v.Runtime, &v.GPUType,
 			&v.GPUCount, &v.MemoryMB, &v.ContextLength, &v.Status, &v.CreatedAt, &v.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, v)
 	}
 	return out, rows.Err()
+}
+
+func (r *PostgresRepository) UpdateArtifactMetadata(id, digest string, size int64, verifiedAt time.Time) error {
+	res, err := r.db.Exec(`UPDATE model_versions SET artifact_digest=$2, artifact_size=$3, artifact_verified_at=$4, updated_at=$4 WHERE id=$1`, id, digest, size, verifiedAt)
+	if err != nil {
+		return mapErr(err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *PostgresRepository) HasVersionReferences(id string) (bool, error) {
+	var exists bool
+	err := r.db.QueryRow(`SELECT EXISTS (SELECT 1 FROM deployments WHERE model_version_id=$1)`, id).Scan(&exists)
+	return exists, mapErr(err)
 }
 
 func (r *PostgresRepository) DeleteVersion(id string) error {

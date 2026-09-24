@@ -5,6 +5,7 @@ package data
 import (
 	"errors"
 	"sync"
+	"time"
 
 	"kk-infra/lib/domain"
 	"kk-infra/lib/errcode"
@@ -30,6 +31,8 @@ type Repository interface {
 	ListVersions(modelID string) ([]*domain.ModelVersion, error)
 	DeleteVersion(id string) error
 	UpdateVersionStatus(id, status string) error
+	UpdateArtifactMetadata(id, digest string, size int64, verifiedAt time.Time) error
+	HasVersionReferences(id string) (bool, error)
 }
 
 // MemoryRepository 内存实现（线程安全）
@@ -188,6 +191,22 @@ func (r *MemoryRepository) UpdateVersionStatus(id, status string) error {
 	v.Status = status
 	return nil
 }
+
+func (r *MemoryRepository) UpdateArtifactMetadata(id, digest string, size int64, verifiedAt time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	v, ok := r.versions[id]
+	if !ok {
+		return ErrNotFound
+	}
+	v.ArtifactDigest = digest
+	v.ArtifactSize = size
+	v.ArtifactVerifiedAt = &verifiedAt
+	v.UpdatedAt = verifiedAt
+	return nil
+}
+
+func (r *MemoryRepository) HasVersionReferences(string) (bool, error) { return false, nil }
 
 // 简单整数转字符串，避免引入 strconv 依赖以外的额外包
 func itoa(n int) string {

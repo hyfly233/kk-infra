@@ -89,6 +89,9 @@ func TestModelLifecycle(t *testing.T) {
 		if v2["status"] != "VALIDATED" {
 			t.Fatalf("校验后状态应为 VALIDATED: %v", v2["status"])
 		}
+		if v2["artifactDigest"] == "" || v2["artifactVerifiedAt"] == nil {
+			t.Fatalf("校验后应持久化 artifact 元数据: %+v", v2)
+		}
 	} else {
 		t.Fatalf("查询版本响应异常: %+v", resp.Data)
 	}
@@ -120,7 +123,7 @@ func TestVersionUnique(t *testing.T) {
 	modelID := resp.Data.(map[string]interface{})["id"].(string)
 
 	body := apitypes.CreateModelVersionRequest{
-		Version: "1.0", ArtifactURI: "s3://x", Runtime: "vLLM", GPUType: "A100", GPUCount: 1, MemoryMB: 1024,
+		Version: "1.0", ArtifactURI: "s3://x/model", Runtime: "vLLM", GPUType: "A100", GPUCount: 1, MemoryMB: 1024,
 	}
 	_, code := doJSON(t, h, http.MethodPost, "/api/v1/models/"+modelID+"/versions", body)
 	if code != http.StatusOK {
@@ -147,9 +150,15 @@ func TestVersionRequiredFields(t *testing.T) {
 
 	// 非 vLLM 运行时
 	_, code = doJSON(t, h, http.MethodPost, "/api/v1/models/"+modelID+"/versions",
-		apitypes.CreateModelVersionRequest{Version: "1.0", ArtifactURI: "s3://x", Runtime: "Triton", GPUType: "A100", GPUCount: 1, MemoryMB: 1024})
+		apitypes.CreateModelVersionRequest{Version: "1.0", ArtifactURI: "s3://x/model", Runtime: "Triton", GPUType: "A100", GPUCount: 1, MemoryMB: 1024})
 	if code != http.StatusBadRequest {
 		t.Fatalf("非 vLLM 应返回 400: %d", code)
+	}
+
+	_, code = doJSON(t, h, http.MethodPost, "/api/v1/models/"+modelID+"/versions",
+		apitypes.CreateModelVersionRequest{Version: "2.0", ArtifactURI: "https://example.com/model", Runtime: "vLLM", GPUType: "A100", GPUCount: 1})
+	if code != http.StatusBadRequest {
+		t.Fatalf("非 S3 artifact 应返回 400: %d", code)
 	}
 }
 
@@ -160,7 +169,7 @@ func TestDeleteProtectedVersion(t *testing.T) {
 	modelID := resp.Data.(map[string]interface{})["id"].(string)
 
 	resp, _ = doJSON(t, h, http.MethodPost, "/api/v1/models/"+modelID+"/versions",
-		apitypes.CreateModelVersionRequest{Version: "1.0", ArtifactURI: "s3://x", Runtime: "vLLM", GPUType: "A100", GPUCount: 1, MemoryMB: 1024})
+		apitypes.CreateModelVersionRequest{Version: "1.0", ArtifactURI: "s3://x/model", Runtime: "vLLM", GPUType: "A100", GPUCount: 1, MemoryMB: 1024})
 	versionID := resp.Data.(map[string]interface{})["id"].(string)
 
 	_, code := doJSON(t, h, http.MethodPost, "/api/v1/versions/"+versionID+"/validate", nil)
@@ -171,5 +180,19 @@ func TestDeleteProtectedVersion(t *testing.T) {
 	_, code = doJSON(t, h, http.MethodDelete, "/api/v1/models/"+modelID+"/versions/1.0", nil)
 	if code != http.StatusConflict {
 		t.Fatalf("已校验版本删除应冲突: %d", code)
+	}
+
+	_, code = doJSON(t, h, http.MethodDelete, "/api/v1/models/"+modelID, nil)
+	if code != http.StatusConflict {
+		t.Fatalf("包含受保护版本的模型删除应冲突: %d", code)
+	}
+
+	_, code = doJSON(t, h, http.MethodPost, "/api/v1/versions/"+versionID+"/release", nil)
+	if code != http.StatusOK {
+		t.Fatalf("发布失败: %d", code)
+	}
+	_, code = doJSON(t, h, http.MethodDelete, "/api/v1/models/"+modelID+"/versions/1.0", nil)
+	if code != http.StatusConflict {
+		t.Fatalf("已发布版本删除应冲突: %d", code)
 	}
 }

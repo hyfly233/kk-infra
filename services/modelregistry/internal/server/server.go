@@ -97,7 +97,7 @@ func (s *Server) handleGetVersion(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleValidateVersion(w http.ResponseWriter, r *http.Request) {
-	v, err := s.registry.ValidateVersion(r.PathValue("versionId"))
+	v, err := s.registry.ValidateVersion(r.Context(), r.PathValue("versionId"))
 	apitypes.WriteResult(w, r, v, err)
 }
 

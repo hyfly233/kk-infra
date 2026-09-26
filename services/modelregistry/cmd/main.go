@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"kk-infra/lib/store"
+	"kk-infra/services/modelregistry/internal/artifact"
 	"kk-infra/services/modelregistry/internal/biz"
 	"kk-infra/services/modelregistry/internal/data"
 	"kk-infra/services/modelregistry/internal/server"
@@ -21,6 +22,8 @@ import (
 func main() {
 	addr := flag.String("addr", ":8081", "监听地址")
 	storage := flag.String("storage", "memory", "存储后端: memory | postgres")
+	s3Endpoint := flag.String("s3-endpoint", "", "S3/MinIO endpoint；为空时使用开发校验器")
+	s3Secure := flag.Bool("s3-secure", false, "S3 endpoint 使用 TLS")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -44,7 +47,19 @@ func main() {
 		logger.Info("使用内存存储")
 	}
 
-	registry := biz.NewRegistry(repo)
+	var verifier artifact.Verifier = artifact.DevelopmentVerifier{}
+	if *s3Endpoint != "" {
+		accessKey, secretKey := os.Getenv("S3_ACCESS_KEY"), os.Getenv("S3_SECRET_KEY")
+		var err error
+		verifier, err = artifact.NewS3Verifier(*s3Endpoint, accessKey, secretKey, *s3Secure)
+		if err != nil {
+			logger.Error("初始化 S3 artifact 校验器失败", "err", err)
+			os.Exit(1)
+		}
+	} else {
+		logger.Warn("未配置 S3 endpoint，artifact 校验使用开发模式")
+	}
+	registry := biz.NewRegistry(repo, verifier)
 	srv := server.NewServer(registry, logger)
 
 	httpSrv := &http.Server{

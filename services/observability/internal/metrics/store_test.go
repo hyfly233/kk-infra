@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -40,6 +41,17 @@ func TestRecordAndQueryDeployment(t *testing.T) {
 	}
 	if got := b.TokensPerSec(60); got != 5 {
 		t.Errorf("tokensPerSec = %v, 期望 5", got)
+	}
+}
+
+func TestPrometheusTextIncludesTenantDimensionsAndGuards(t *testing.T) {
+	s := NewStore(0)
+	s.RecordRequest(Sample{Ts: time.Now(), TenantID: "tenant-a", DeploymentID: "dep-1", Model: "qwen", InputTokens: 10, OutputTokens: 20, Tokens: 30, TTFTMs: 45, TPOTMs: 8.5, QueueLength: 3, KVCacheUsage: .7, GPUMemoryBytes: 1024})
+	text := s.PrometheusText()
+	for _, want := range []string{`tenant_id="tenant-a",model_id="qwen",deployment_id="dep-1"`, `carrot_inference_requests_total`, `carrot_inference_queue_length`, `carrot_inference_ttft_ms`, `carrot_inference_tpot_ms`, `carrot_inference_kv_cache_usage_ratio`, `carrot_inference_gpu_memory_bytes`} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q in %s", want, text)
+		}
 	}
 }
 

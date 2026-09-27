@@ -4,21 +4,30 @@
 package metrics
 
 import (
+	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
 
 // Sample 一条请求指标采样
 type Sample struct {
-	Ts           time.Time
-	TenantID     string
-	DeploymentID string
-	Model        string
-	LatencyMs    int64
-	TTFTMs       int64
-	Tokens       int
-	Err          bool
+	Ts             time.Time
+	TenantID       string
+	DeploymentID   string
+	Model          string
+	Pod            string
+	LatencyMs      int64
+	TTFTMs         int64
+	Tokens         int
+	InputTokens    int
+	OutputTokens   int
+	TPOTMs         float64
+	QueueLength    float64
+	KVCacheUsage   float64
+	GPUMemoryBytes float64
+	Err            bool
 }
 
 // GPUSample 一条 GPU 利用率采样（节点 × 型号粒度）
@@ -38,6 +47,13 @@ type Store struct {
 	reqs      []Sample
 	gpus      []GPUSample
 	keepSince time.Time
+	totals    map[string]*requestTotal
+}
+
+type requestTotal struct {
+	TenantID, DeploymentID, Model, Pod          string
+	Requests, Errors, InputTokens, OutputTokens int64
+	Latest                                      Sample
 }
 
 // NewStore 创建指标存储，retention 为保留窗口（默认 2h）。
@@ -45,7 +61,7 @@ func NewStore(retention time.Duration) *Store {
 	if retention <= 0 {
 		retention = 2 * time.Hour
 	}
-	return &Store{keepSince: time.Now().Add(-retention)}
+	return &Store{keepSince: time.Now().Add(-retention), totals: make(map[string]*requestTotal)}
 }
 
 // RecordRequest 记录一条请求指标。
@@ -53,7 +69,47 @@ func (s *Store) RecordRequest(sm Sample) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.reqs = append(s.reqs, sm)
+	key := sm.TenantID + "\x00" + sm.DeploymentID + "\x00" + sm.Model + "\x00" + sm.Pod
+	total := s.totals[key]
+	if total == nil {
+		total = &requestTotal{TenantID: sm.TenantID, DeploymentID: sm.DeploymentID, Model: sm.Model, Pod: sm.Pod}
+		s.totals[key] = total
+	}
+	total.Requests++
+	if sm.Err {
+		total.Errors++
+	}
+	total.InputTokens += int64(sm.InputTokens)
+	total.OutputTokens += int64(sm.OutputTokens)
+	total.Latest = sm
 	s.gcLocked(time.Now())
+}
+
+// PrometheusText exposes request counters and autoscaling/guard gauges.
+func (s *Store) PrometheusText() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	keys := make([]string, 0, len(s.totals))
+	for key := range s.totals {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	b.WriteString("# TYPE carrot_inference_requests_total counter\n# TYPE carrot_inference_errors_total counter\n# TYPE carrot_inference_input_tokens_total counter\n# TYPE carrot_inference_output_tokens_total counter\n")
+	b.WriteString("# TYPE carrot_inference_queue_length gauge\n# TYPE carrot_inference_ttft_ms gauge\n# TYPE carrot_inference_tpot_ms gauge\n# TYPE carrot_inference_kv_cache_usage_ratio gauge\n# TYPE carrot_inference_gpu_memory_bytes gauge\n")
+	for _, key := range keys {
+		t := s.totals[key]
+		labels := fmt.Sprintf(`tenant_id="%s",model_id="%s",deployment_id="%s",pod="%s"`, escapeLabel(t.TenantID), escapeLabel(t.Model), escapeLabel(t.DeploymentID), escapeLabel(t.Pod))
+		fmt.Fprintf(&b, "carrot_inference_requests_total{%s} %d\ncarrot_inference_errors_total{%s} %d\ncarrot_inference_input_tokens_total{%s} %d\ncarrot_inference_output_tokens_total{%s} %d\n", labels, t.Requests, labels, t.Errors, labels, t.InputTokens, labels, t.OutputTokens)
+		fmt.Fprintf(&b, "carrot_inference_queue_length{%s} %g\ncarrot_inference_ttft_ms{%s} %d\ncarrot_inference_tpot_ms{%s} %g\ncarrot_inference_kv_cache_usage_ratio{%s} %g\ncarrot_inference_gpu_memory_bytes{%s} %g\n", labels, t.Latest.QueueLength, labels, t.Latest.TTFTMs, labels, t.Latest.TPOTMs, labels, t.Latest.KVCacheUsage, labels, t.Latest.GPUMemoryBytes)
+	}
+	return b.String()
+}
+
+func escapeLabel(v string) string {
+	v = strings.ReplaceAll(v, "\\", "\\\\")
+	v = strings.ReplaceAll(v, "\n", "\\n")
+	return strings.ReplaceAll(v, "\"", "\\\"")
 }
 
 // RecordGPU 记录一条 GPU 利用率采样。
@@ -113,12 +169,16 @@ func ParseRange(r string, now time.Time) Range {
 
 // Bucket 时间桶（聚合点）
 type Bucket struct {
-	Ts         int64 // 桶起始 unix 秒
-	Requests   int64
-	Errors     int64
-	LatencySum int64
-	TTFTSum    int64
-	Tokens     int64
+	Ts           int64 // 桶起始 unix 秒
+	Requests     int64
+	Errors       int64
+	LatencySum   int64
+	TTFTSum      int64
+	Tokens       int64
+	TPOTSum      float64
+	QueueMax     float64
+	KVCacheMax   float64
+	GPUMemoryMax float64
 }
 
 // ErrorRate 错误率（%）
@@ -186,6 +246,16 @@ func (s *Store) DeploymentMetrics(deploymentID string, r Range) DeploymentSeries
 		b.LatencySum += sm.LatencyMs
 		b.TTFTSum += sm.TTFTMs
 		b.Tokens += int64(sm.Tokens)
+		b.TPOTSum += sm.TPOTMs
+		if sm.QueueLength > b.QueueMax {
+			b.QueueMax = sm.QueueLength
+		}
+		if sm.KVCacheUsage > b.KVCacheMax {
+			b.KVCacheMax = sm.KVCacheUsage
+		}
+		if sm.GPUMemoryBytes > b.GPUMemoryMax {
+			b.GPUMemoryMax = sm.GPUMemoryBytes
+		}
 	}
 	sort.Slice(buckets, func(i, j int) bool { return buckets[i].Ts < buckets[j].Ts })
 	return DeploymentSeries{DeploymentID: deploymentID, Buckets: buckets, BucketSecs: secs}

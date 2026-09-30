@@ -33,6 +33,7 @@ func main() {
 
 	store := metrics.NewStore(*retention)
 	srv := server.NewServer(store, logger)
+	var usageStore usage.Store = usage.NewMemoryStore()
 	if *storage == "postgres" {
 		db, err := platformstore.Open(platformstore.DefaultConfig())
 		if err != nil {
@@ -43,7 +44,20 @@ func main() {
 			logger.Error("执行 migration 失败", "err", err)
 			os.Exit(1)
 		}
-		srv.SetUsageStore(usage.NewPostgresStore(db))
+		usageStore = usage.NewPostgresStore(db)
+		srv.SetUsageStore(usageStore)
+		go func() {
+			ticker := time.NewTicker(time.Minute)
+			defer ticker.Stop()
+			for range ticker.C {
+				if err := usageStore.AccrueGPU(context.Background(), time.Now(), time.Minute); err != nil {
+					logger.Warn("累计 GPU 副本时长失败", "err", err)
+				}
+			}
+		}()
+	}
+	if *storage != "postgres" {
+		srv.SetUsageStore(usageStore)
 	}
 
 	// R2-3：Prometheus adapter（DCGM 指标查询）

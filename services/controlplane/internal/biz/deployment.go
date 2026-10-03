@@ -3,6 +3,7 @@ package biz
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"kk-infra/lib/apitypes"
@@ -190,6 +191,12 @@ func (uc *DeploymentUseCase) submit(ctx context.Context, d *domain.ModelDeployme
 	}
 	time.Sleep(200 * time.Millisecond) // 模拟校验耗时
 	uc.transition(d.ID, domain.DeploymentStatusValidating, domain.DeploymentStatusSubmitting, "校验通过，提交 Kubernetes")
+	version, err := uc.models.GetVersion(ctx, d.ModelVersionID)
+	if err != nil || !version.Deployable() {
+		uc.failDeployment(d.ID, "模型 artifact 元数据不可用")
+		return
+	}
+	artifactURI, artifactDigest := deployableArtifact(version)
 
 	// 提交 K8s
 	spec := &clients.CreateDeploymentSpec{
@@ -207,7 +214,9 @@ func (uc *DeploymentUseCase) submit(ctx context.Context, d *domain.ModelDeployme
 			"carrot.ai/tenant-id":     d.TenantID,
 			"carrot.ai/managed-by":    "carrot",
 		},
-		ModelPath: deploymentModelPath(d),
+		ModelPath:      deploymentModelPath(d),
+		ArtifactURI:    artifactURI,
+		ArtifactDigest: artifactDigest,
 	}
 	res, err := uc.kube.CreateDeployment(ctx, spec)
 	if err != nil {
@@ -474,6 +483,7 @@ func (uc *DeploymentUseCase) UpgradeDeployment(ctx context.Context, id, newVersi
 	if err != nil {
 		return nil, errcode.Wrap(errcode.ErrInternal, "读取升级后部署失败", err)
 	}
+	artifactURI, artifactDigest := deployableArtifact(version)
 	// 触发 K8s 滚动更新：更新现有 Deployment 的 Pod template。
 	spec := &clients.CreateDeploymentSpec{
 		DeploymentID: updated.ID,
@@ -490,7 +500,9 @@ func (uc *DeploymentUseCase) UpgradeDeployment(ctx context.Context, id, newVersi
 			"carrot.ai/tenant-id":     updated.TenantID,
 			"carrot.ai/managed-by":    "carrot",
 		},
-		ModelPath: deploymentModelPath(updated),
+		ModelPath:      deploymentModelPath(updated),
+		ArtifactURI:    artifactURI,
+		ArtifactDigest: artifactDigest,
 	}
 	if _, err := uc.kube.UpdateDeployment(ctx, spec); err != nil {
 		uc.failDeployment(id, "升级失败: "+err.Error())
@@ -609,6 +621,13 @@ func (uc *DeploymentUseCase) checkGPUQuota(ctx context.Context, gpuType string, 
 // MVP：模型路径来自版本 ArtifactURI 的简化解析（真实场景由模型存储适配器注入）。
 func deploymentModelPath(d *domain.ModelDeployment) string {
 	return "/models/" + d.ModelName
+}
+
+func deployableArtifact(version *domain.ModelVersion) (string, string) {
+	if version != nil && strings.HasPrefix(version.ArtifactDigest, "sha256:") {
+		return version.ArtifactURI, version.ArtifactDigest
+	}
+	return "", ""
 }
 
 // getRequestID 从 context 取 RequestID（biz 层不依赖 middleware 包）

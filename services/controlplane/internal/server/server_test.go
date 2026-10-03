@@ -22,22 +22,24 @@ type mockModelClient struct{}
 
 func (m *mockModelClient) GetVersion(ctx context.Context, versionID string) (*domain.ModelVersion, error) {
 	return &domain.ModelVersion{
-		ID:          versionID,
-		ModelID:     "m1",
-		ModelName:   "qwen",
-		Version:     "7b",
-		ArtifactURI: "s3://models/qwen-7b",
-		Runtime:     domain.RuntimeVLLM,
-		GPUType:     "A100",
-		GPUCount:    1,
-		MemoryMB:    32768,
-		Status:      domain.ModelStatusReleased,
+		ID:             versionID,
+		ModelID:        "m1",
+		ModelName:      "qwen",
+		Version:        "7b",
+		ArtifactURI:    "s3://models/qwen-7b",
+		ArtifactDigest: "sha256:0123456789abcdef",
+		Runtime:        domain.RuntimeVLLM,
+		GPUType:        "A100",
+		GPUCount:       1,
+		MemoryMB:       32768,
+		Status:         domain.ModelStatusReleased,
 	}, nil
 }
 
 // mockKubeClient 模拟 k8sadapter：简单内存部署
 type mockKubeClient struct {
-	deploys map[string]int32 // name → ready 数
+	deploys  map[string]int32 // name → ready 数
+	lastSpec *clients.CreateDeploymentSpec
 }
 
 func newMockKube() *mockKubeClient {
@@ -56,6 +58,7 @@ func (m *mockKubeClient) ListGPUs(ctx context.Context) ([]domain.GPUResource, er
 
 func (m *mockKubeClient) CreateDeployment(ctx context.Context, spec *clients.CreateDeploymentSpec) (*clients.K8sDeploymentResult, error) {
 	m.deploys[spec.Name] = spec.Replicas
+	m.lastSpec = spec
 	return &clients.K8sDeploymentResult{
 		DeploymentID: spec.DeploymentID,
 		Status:       &clients.K8sDeploymentStatus{Replicas: spec.Replicas, ReadyReplicas: spec.Replicas, Condition: "Available"},
@@ -65,7 +68,30 @@ func (m *mockKubeClient) CreateDeployment(ctx context.Context, spec *clients.Cre
 
 func (m *mockKubeClient) UpdateDeployment(ctx context.Context, spec *clients.CreateDeploymentSpec) (*clients.K8sDeploymentResult, error) {
 	m.deploys[spec.Name] = spec.Replicas
+	m.lastSpec = spec
 	return m.GetDeployment(ctx, spec.Name, spec.Namespace)
+}
+
+func TestDeploymentPassesVerifiedArtifactToAdapter(t *testing.T) {
+	repo := data.NewMemoryDeploymentRepository()
+	kube := newMockKube()
+	useCase := biz.NewDeploymentUseCase(repo, &mockModelClient{}, kube)
+	_, err := useCase.CreateDeployment(context.Background(), &apitypes.CreateDeploymentRequest{
+		IdempotencyKey: "artifact-deploy", Name: "artifact-demo", ModelVersionID: "v1", Replicas: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for kube.lastSpec == nil && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if kube.lastSpec == nil {
+		t.Fatal("deployment was not submitted")
+	}
+	if kube.lastSpec.ArtifactURI != "s3://models/qwen-7b" || kube.lastSpec.ArtifactDigest != "sha256:0123456789abcdef" {
+		t.Fatalf("verified artifact metadata not forwarded: %+v", kube.lastSpec)
+	}
 }
 
 func (m *mockKubeClient) GetDeployment(ctx context.Context, name, namespace string) (*clients.K8sDeploymentResult, error) {

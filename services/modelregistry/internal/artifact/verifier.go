@@ -46,11 +46,11 @@ func (v *S3Verifier) Verify(ctx context.Context, rawURI, expectedDigest string) 
 		return nil, fmt.Errorf("S3 HeadObject 失败: %w", err)
 	}
 	digest := strings.TrimSpace(info.Metadata.Get("X-Amz-Meta-Sha256"))
-	if digest != "" && !strings.HasPrefix(digest, "sha256:") {
-		digest = "sha256:" + digest
+	if digest == "" {
+		return nil, fmt.Errorf("artifact 缺少 x-amz-meta-sha256 元数据")
 	}
-	if digest == "" && info.ETag != "" {
-		digest = "etag:" + strings.Trim(info.ETag, "\"")
+	if !strings.HasPrefix(digest, "sha256:") {
+		digest = "sha256:" + digest
 	}
 	if expectedDigest != "" && !strings.EqualFold(expectedDigest, digest) {
 		return nil, fmt.Errorf("artifact checksum 不匹配: expected=%s actual=%s", expectedDigest, digest)

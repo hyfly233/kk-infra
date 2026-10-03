@@ -25,6 +25,8 @@ func main() {
 	deployImage := flag.String("deploy-image", "", "部署使用的模型镜像（默认 vllm/vllm-openai:latest）")
 	kedaEnabled := flag.Bool("keda-enabled", false, "为每个真实部署创建 KEDA ScaledObject（要求集群已安装 KEDA）")
 	prometheusURL := flag.String("prometheus-url", "http://prometheus.monitoring.svc.cluster.local:9090", "KEDA 查询的 Prometheus 地址")
+	s3Endpoint := flag.String("s3-endpoint", "", "供模型 init container 使用的 S3/MinIO endpoint")
+	s3Secure := flag.Bool("s3-secure", false, "S3 endpoint 使用 TLS")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -40,6 +42,7 @@ func main() {
 			os.Exit(1)
 		}
 		real.ConfigureKEDA(*kedaEnabled, *prometheusURL)
+		real.ConfigureArtifactStorage(*s3Endpoint, os.Getenv("S3_ACCESS_KEY"), os.Getenv("S3_SECRET_KEY"), *s3Secure)
 		kube = real
 		if *virtualGPUs != "" {
 			logger.Info("k8sadapter 使用真实集群 + 虚拟 GPU 池", "virtualGPUs", *virtualGPUs)

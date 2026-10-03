@@ -30,15 +30,26 @@ type RealKubeClient struct {
 	// 虚拟 GPU 池配置（Docker Desktop 等无 GPU 环境使用）
 	virtualGPUs []FakeNodeConfig
 	// 部署镜像（vLLM 或 mock；由环境变量注入便于无 GPU 验证）
-	deployImage   string
-	kedaEnabled   bool
-	prometheusURL string
+	deployImage       string
+	kedaEnabled       bool
+	prometheusURL     string
+	artifactEndpoint  string
+	artifactAccessKey string
+	artifactSecretKey string
+	artifactSecure    bool
 }
 
 // ConfigureKEDA controls dynamic ScaledObject reconciliation for real clusters.
 func (c *RealKubeClient) ConfigureKEDA(enabled bool, prometheusURL string) {
 	c.kedaEnabled = enabled
 	c.prometheusURL = strings.TrimRight(prometheusURL, "/")
+}
+
+func (c *RealKubeClient) ConfigureArtifactStorage(endpoint, accessKey, secretKey string, secure bool) {
+	c.artifactEndpoint = endpoint
+	c.artifactAccessKey = accessKey
+	c.artifactSecretKey = secretKey
+	c.artifactSecure = secure
 }
 
 // KubeConfig kubeconfig 结构（子集）

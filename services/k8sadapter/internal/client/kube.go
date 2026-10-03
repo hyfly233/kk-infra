@@ -15,16 +15,18 @@ var ErrNotFound = errors.New("deployment not found")
 
 // DeploymentSpec 创建部署的入参（由 controlplane 通过 HTTP 传入）
 type DeploymentSpec struct {
-	DeploymentID string            `json:"deploymentId"`
-	Name         string            `json:"name"`
-	Namespace    string            `json:"namespace"`
-	Replicas     int32             `json:"replicas"`
-	Resource     domain.Resource   `json:"resource"`
-	Image        string            `json:"image"`
-	Args         []string          `json:"args"`
-	Labels       map[string]string `json:"labels"`    // carrot.ai/* 标签
-	Env          map[string]string `json:"env"`       // 注入环境变量
-	ModelPath    string            `json:"modelPath"` // 模型权重挂载路径
+	DeploymentID   string            `json:"deploymentId"`
+	Name           string            `json:"name"`
+	Namespace      string            `json:"namespace"`
+	Replicas       int32             `json:"replicas"`
+	Resource       domain.Resource   `json:"resource"`
+	Image          string            `json:"image"`
+	Args           []string          `json:"args"`
+	Labels         map[string]string `json:"labels"`    // carrot.ai/* 标签
+	Env            map[string]string `json:"env"`       // 注入环境变量
+	ModelPath      string            `json:"modelPath"` // 模型权重挂载路径
+	ArtifactURI    string            `json:"artifactUri,omitempty"`
+	ArtifactDigest string            `json:"artifactDigest,omitempty"`
 }
 
 // DeploymentResult 创建/查询结果

@@ -205,16 +205,18 @@ func NewK8sAdapterClient(baseURL string) *K8sAdapterClient {
 
 // CreateDeploymentSpec 创建部署入参
 type CreateDeploymentSpec struct {
-	DeploymentID string            `json:"deploymentId"`
-	Name         string            `json:"name"`
-	Namespace    string            `json:"namespace"`
-	Replicas     int32             `json:"replicas"`
-	Resource     domain.Resource   `json:"resource"`
-	Image        string            `json:"image"`
-	Args         []string          `json:"args"`
-	Labels       map[string]string `json:"labels"`
-	Env          map[string]string `json:"env"`
-	ModelPath    string            `json:"modelPath"`
+	DeploymentID   string            `json:"deploymentId"`
+	Name           string            `json:"name"`
+	Namespace      string            `json:"namespace"`
+	Replicas       int32             `json:"replicas"`
+	Resource       domain.Resource   `json:"resource"`
+	Image          string            `json:"image"`
+	Args           []string          `json:"args"`
+	Labels         map[string]string `json:"labels"`
+	Env            map[string]string `json:"env"`
+	ModelPath      string            `json:"modelPath"`
+	ArtifactURI    string            `json:"artifactUri,omitempty"`
+	ArtifactDigest string            `json:"artifactDigest,omitempty"`
 }
 
 // K8sDeploymentStatus 同步的部署状态（与 k8sadapter 类型一致）

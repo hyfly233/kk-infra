@@ -187,7 +187,7 @@ func (c *RealKubeClient) CreateDeployment(ctx context.Context, spec *DeploymentS
 	// 复用 renderer 生成 manifest
 	// 虚拟 GPU 池模式（无真实 GPU 节点）不声明 nvidia.com/gpu，避免调度失败
 	gpuEnabled := len(c.virtualGPUs) == 0
-	res, err := renderDeploymentManifests(spec, ns, image, gpuEnabled)
+	res, err := renderDeploymentManifests(spec, ns, image, gpuEnabled, c.artifactConfig())
 	if err != nil {
 		return nil, err
 	}
@@ -198,6 +198,11 @@ func (c *RealKubeClient) CreateDeployment(ctx context.Context, spec *DeploymentS
 			return nil, err
 		}
 		return c.GetDeployment(ctx, spec.Name, ns)
+	}
+	if res.Secret != nil {
+		if err := c.ensure(ctx, "/api/v1/namespaces/"+ns+"/secrets/"+res.Secret.Metadata.Name, "/api/v1/namespaces/"+ns+"/secrets", res.Secret); err != nil {
+			return nil, fmt.Errorf("创建 artifact Secret 失败: %w", err)
+		}
 	}
 
 	// 创建 Deployment
@@ -226,9 +231,14 @@ func (c *RealKubeClient) UpdateDeployment(ctx context.Context, spec *DeploymentS
 	if image == "" {
 		image = "vllm/vllm-openai:latest"
 	}
-	res, err := renderDeploymentManifests(spec, ns, image, len(c.virtualGPUs) == 0)
+	res, err := renderDeploymentManifests(spec, ns, image, len(c.virtualGPUs) == 0, c.artifactConfig())
 	if err != nil {
 		return nil, err
+	}
+	if res.Secret != nil {
+		if err := c.ensure(ctx, "/api/v1/namespaces/"+ns+"/secrets/"+res.Secret.Metadata.Name, "/api/v1/namespaces/"+ns+"/secrets", res.Secret); err != nil {
+			return nil, fmt.Errorf("更新 artifact Secret 失败: %w", err)
+		}
 	}
 	patch := map[string]interface{}{
 		"metadata": map[string]interface{}{"labels": res.Deployment.Metadata.Labels},
@@ -385,6 +395,7 @@ func (c *RealKubeClient) DeleteDeployment(ctx context.Context, name, namespace s
 	}
 	// Service 一并删除（忽略不存在）
 	_ = c.do(ctx, "DELETE", "/api/v1/namespaces/"+ns+"/services/"+name, nil, nil)
+	_ = c.do(ctx, "DELETE", "/api/v1/namespaces/"+ns+"/secrets/"+name+"-artifact", nil, nil)
 	if c.kedaEnabled {
 		_ = c.do(ctx, "DELETE", "/apis/keda.sh/v1alpha1/namespaces/"+ns+"/scaledobjects/"+name, nil, nil)
 	}
@@ -521,7 +532,16 @@ func parseInt(s string) int32 {
 // gpuEnabled=false 时（虚拟 GPU 池验证场景）不声明 nvidia.com/gpu，避免无 GPU 集群调度失败。
 // 注意：此处不使用 renderer 包的 Render（其输出含 vLLM 固定参数），
 // 而是按 spec 直接生成，便于接入自定义镜像。
-func renderDeploymentManifests(spec *DeploymentSpec, ns, image string, gpuEnabled bool) (*deployManifests, error) {
+type artifactStorageConfig struct {
+	Endpoint, AccessKey, SecretKey string
+	Secure                         bool
+}
+
+func (c *RealKubeClient) artifactConfig() artifactStorageConfig {
+	return artifactStorageConfig{c.artifactEndpoint, c.artifactAccessKey, c.artifactSecretKey, c.artifactSecure}
+}
+
+func renderDeploymentManifests(spec *DeploymentSpec, ns, image string, gpuEnabled bool, storage artifactStorageConfig) (*deployManifests, error) {
 	if spec.Name == "" || spec.Resource.GPUCount <= 0 {
 		return nil, fmt.Errorf("渲染参数不完整")
 	}
@@ -530,6 +550,12 @@ func renderDeploymentManifests(spec *DeploymentSpec, ns, image string, gpuEnable
 		labels[k] = v
 	}
 	labels["app"] = spec.Name
+	if spec.ArtifactURI != "" && (!strings.HasPrefix(spec.ArtifactURI, "s3://") || !strings.HasPrefix(spec.ArtifactDigest, "sha256:")) {
+		return nil, fmt.Errorf("artifact 下载要求 s3 URI 和 sha256 digest")
+	}
+	if spec.ArtifactURI != "" && (storage.Endpoint == "" || storage.AccessKey == "" || storage.SecretKey == "") {
+		return nil, fmt.Errorf("artifact 下载未配置 S3 endpoint/credentials")
+	}
 
 	// 启动参数：--model + 用户参数（mock 镜像忽略 --model）
 	args := []string{"--model", spec.ModelPath}
@@ -574,6 +600,33 @@ func renderDeploymentManifests(spec *DeploymentSpec, ns, image string, gpuEnable
 			},
 		},
 	}
+	var secret *k8s.Secret
+	if spec.ArtifactURI != "" {
+		secretName := spec.Name + "-artifact"
+		endpoint := storage.Endpoint
+		if !strings.Contains(endpoint, "://") {
+			if storage.Secure {
+				endpoint = "https://" + endpoint
+			} else {
+				endpoint = "http://" + endpoint
+			}
+		}
+		secret = &k8s.Secret{APIVersion: "v1", Kind: "Secret", Metadata: k8s.ObjectMeta{Name: secretName, Namespace: ns, Labels: labels}, Type: "Opaque", StringData: map[string]string{
+			"endpoint": endpoint, "access-key": storage.AccessKey, "secret-key": storage.SecretKey,
+		}}
+		secretRef := func(key string) *k8s.EnvVarSource {
+			return &k8s.EnvVarSource{SecretKeyRef: &k8s.SecretKeySelector{Name: secretName, Key: key}}
+		}
+		dep.Spec.Template.Spec.Volumes = []k8s.Volume{{Name: "model", EmptyDir: &k8s.EmptyDirVolume{}}}
+		dep.Spec.Template.Spec.InitContainers = []k8s.Container{{
+			Name: "download-model", Image: "minio/mc:RELEASE.2025-07-21T05-28-08Z", Command: []string{"/bin/sh"},
+			Args:         []string{"-ec", `mc alias set storage "$S3_ENDPOINT" "$S3_ACCESS_KEY" "$S3_SECRET_KEY"; mc cp "storage/${ARTIFACT_URI#s3://}" /tmp/model.tar; echo "${ARTIFACT_DIGEST#sha256:}  /tmp/model.tar" | sha256sum -c -; mkdir -p /models/model; tar -xf /tmp/model.tar -C /models/model`},
+			Env:          []k8s.EnvVar{{Name: "S3_ENDPOINT", ValueFrom: secretRef("endpoint")}, {Name: "S3_ACCESS_KEY", ValueFrom: secretRef("access-key")}, {Name: "S3_SECRET_KEY", ValueFrom: secretRef("secret-key")}, {Name: "ARTIFACT_URI", Value: spec.ArtifactURI}, {Name: "ARTIFACT_DIGEST", Value: spec.ArtifactDigest}},
+			VolumeMounts: []k8s.VolumeMount{{Name: "model", MountPath: "/models"}},
+		}}
+		dep.Spec.Template.Spec.Containers[0].VolumeMounts = []k8s.VolumeMount{{Name: "model", MountPath: "/models", ReadOnly: true}}
+		dep.Spec.Template.Spec.Containers[0].Args[1] = "/models/model"
+	}
 	svc := &k8s.Service{
 		APIVersion: "v1",
 		Kind:       "Service",
@@ -584,13 +637,14 @@ func renderDeploymentManifests(spec *DeploymentSpec, ns, image string, gpuEnable
 			Type:     "ClusterIP",
 		},
 	}
-	return &deployManifests{Deployment: dep, Service: svc}, nil
+	return &deployManifests{Deployment: dep, Service: svc, Secret: secret}, nil
 }
 
 // deployManifests 渲染产物
 type deployManifests struct {
 	Deployment *k8s.Deployment
 	Service    *k8s.Service
+	Secret     *k8s.Secret
 }
 
 // 确保 json 引用

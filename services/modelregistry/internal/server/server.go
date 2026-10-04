@@ -14,14 +14,17 @@ import (
 
 // Server 模型注册 HTTP 服务
 type Server struct {
-	registry *biz.Registry
-	logger   *slog.Logger
+	registry      *biz.Registry
+	logger        *slog.Logger
+	pipelineToken string
 }
 
 // NewServer 创建服务
 func NewServer(registry *biz.Registry, logger *slog.Logger) *Server {
 	return &Server{registry: registry, logger: logger}
 }
+
+func (s *Server) SetPipelineToken(token string) { s.pipelineToken = token }
 
 // Handler 返回路由
 func (s *Server) Handler() http.Handler {
@@ -102,6 +105,10 @@ func (s *Server) handleValidateVersion(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleReleaseVersion(w http.ResponseWriter, r *http.Request) {
+	if s.pipelineToken != "" && r.Header.Get("X-Pipeline-Token") != s.pipelineToken {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrUnauthorized, "仅发布流水线可发布模型版本"))
+		return
+	}
 	v, err := s.registry.ReleaseVersion(r.PathValue("versionId"))
 	apitypes.WriteResult(w, r, v, err)
 }

@@ -21,6 +21,16 @@ func newTestServer(t *testing.T) http.Handler {
 	return NewServer(registry, logger).Handler()
 }
 
+func newProtectedTestServer(t *testing.T) http.Handler {
+	t.Helper()
+	repo := data.NewMemoryRepository()
+	registry := biz.NewRegistry(repo)
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+	server := NewServer(registry, logger)
+	server.SetPipelineToken("pipeline-secret")
+	return server.Handler()
+}
+
 func doJSON(t *testing.T, h http.Handler, method, path string, body interface{}) (*apitypes.Response, int) {
 	t.Helper()
 	var buf bytes.Buffer
@@ -113,6 +123,26 @@ func TestModelNameUnique(t *testing.T) {
 	_, code = doJSON(t, h, http.MethodPost, "/api/v1/models", apitypes.CreateModelRequest{Name: "dup"})
 	if code != http.StatusConflict {
 		t.Fatalf("重名应返回 409: %d", code)
+	}
+}
+
+func TestReleaseRequiresPipelineToken(t *testing.T) {
+	h := newProtectedTestServer(t)
+	resp, _ := doJSON(t, h, http.MethodPost, "/api/v1/models", apitypes.CreateModelRequest{Name: "protected"})
+	modelID := resp.Data.(map[string]interface{})["id"].(string)
+	resp, _ = doJSON(t, h, http.MethodPost, "/api/v1/models/"+modelID+"/versions", apitypes.CreateModelVersionRequest{Version: "1", ArtifactURI: "s3://models/protected.tar", GPUType: "A100", GPUCount: 1})
+	versionID := resp.Data.(map[string]interface{})["id"].(string)
+	_, _ = doJSON(t, h, http.MethodPost, "/api/v1/versions/"+versionID+"/validate", nil)
+	_, code := doJSON(t, h, http.MethodPost, "/api/v1/versions/"+versionID+"/release", nil)
+	if code != http.StatusUnauthorized {
+		t.Fatalf("release without pipeline token should be unauthorized: %d", code)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/versions/"+versionID+"/release", nil)
+	req.Header.Set("X-Pipeline-Token", "pipeline-secret")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pipeline release failed: %d %s", rec.Code, rec.Body.String())
 	}
 }
 

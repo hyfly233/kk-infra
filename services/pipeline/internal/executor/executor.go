@@ -30,29 +30,29 @@ func (e *DefaultExecutor) Run(modelVersionID, operator string) (*pipeline.Releas
 	}
 	stages := []pipeline.RunResult{
 		{
-			Stage:  pipeline.StageArtifactValidate,
-			Status: "passed",
-			Message: "artifact 校验通过（占位：需接入对象存储校验）",
+			Stage:      pipeline.StageArtifactValidate,
+			Status:     "passed",
+			Message:    "artifact 校验通过（占位：需接入对象存储校验）",
 			DurationMs: 50,
 		},
 		{
-			Stage:  pipeline.StageProbe,
-			Status: "passed",
-			Message: "启动探针通过（vLLM readiness /health）",
+			Stage:      pipeline.StageProbe,
+			Status:     "passed",
+			Message:    "启动探针通过（vLLM readiness /health）",
 			DurationMs: 500,
 		},
 	}
 	if e.SkipBenchmark {
 		stages = append(stages, pipeline.RunResult{
-			Stage:  pipeline.StageBenchmark,
-			Status: "skipped",
+			Stage:   pipeline.StageBenchmark,
+			Status:  "skipped",
 			Message: "基准测试已跳过（需真实推理环境）",
 		})
 	} else {
 		bench, _ := e.RunBenchmark(modelVersionID)
 		stages = append(stages, pipeline.RunResult{
-			Stage:  pipeline.StageBenchmark,
-			Status: "passed",
+			Stage:   pipeline.StageBenchmark,
+			Status:  "passed",
 			Message: "基准测试完成",
 		})
 		_ = bench
@@ -66,16 +66,18 @@ func (e *DefaultExecutor) Run(modelVersionID, operator string) (*pipeline.Releas
 		ModelVersionID: modelVersionID,
 		Operator:       operator,
 		StageResults:   stages,
-		ReleasedAt:     time.Now().Format(time.RFC3339),
+		ReleasedAt:     timePointer(time.Now()),
 	}, nil
 }
+
+func timePointer(value time.Time) *time.Time { return &value }
 
 // ValidateArtifact artifact 校验（占位）
 func (e *DefaultExecutor) ValidateArtifact(modelVersionID string) (*pipeline.RunResult, error) {
 	return &pipeline.RunResult{
-		Stage:    pipeline.StageArtifactValidate,
-		Status:   "passed",
-		Message:  "artifact 校验通过（占位）",
+		Stage:      pipeline.StageArtifactValidate,
+		Status:     "passed",
+		Message:    "artifact 校验通过（占位）",
 		DurationMs: 50,
 	}, nil
 }

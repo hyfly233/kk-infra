@@ -9,6 +9,8 @@
 // vLLM 启动探针、RELEASED 门禁。基准测试/灰度权重为后续实现。
 package pipeline
 
+import "time"
+
 // Stage 流水线阶段
 type Stage string
 
@@ -22,28 +24,34 @@ const (
 
 // RunResult 流水线单阶段执行结果
 type RunResult struct {
-	Stage    Stage  `json:"stage"`
-	Status   string `json:"status"` // pending / running / passed / failed / skipped
-	Message  string `json:"message"`
-	DurationMs int64 `json:"durationMs"`
+	Stage      Stage  `json:"stage"`
+	Status     string `json:"status"` // pending / running / passed / failed / skipped
+	Message    string `json:"message"`
+	DurationMs int64  `json:"durationMs"`
 }
 
 // BenchmarkResult 基准测试结果（版本发布记录用）
 type BenchmarkResult struct {
 	ModelVersionID string  `json:"modelVersionId"`
-	TTFTMs         float64 `json:"ttftMs"`     // 平均首 Token 延迟
+	TTFTMs         float64 `json:"ttftMs"`       // 平均首 Token 延迟
 	TokensPerSec   float64 `json:"tokensPerSec"` // 吞吐
-	Requests       int64   `json:"requests"`   // 测试请求数
-	ErrorRate      float64 `json:"errorRate"`  // 错误率 %
+	Requests       int64   `json:"requests"`     // 测试请求数
+	ErrorRate      float64 `json:"errorRate"`    // 错误率 %
 }
 
 // ReleaseRecord 发布记录（持久化到 model_versions 状态 + audit）
 type ReleaseRecord struct {
-	ModelVersionID string           `json:"modelVersionId"`
-	Operator       string           `json:"operator"`   // 操作者
-	StageResults   []RunResult      `json:"stageResults"`
-	Benchmark      *BenchmarkResult `json:"benchmark,omitempty"`
-	ReleasedAt     string           `json:"releasedAt"`
+	ID              string           `json:"id"`
+	ModelVersionID  string           `json:"modelVersionId"`
+	Operator        string           `json:"operator"` // 操作者
+	Status          string           `json:"status"`
+	StageResults    []RunResult      `json:"stageResults"`
+	Benchmark       *BenchmarkResult `json:"benchmark,omitempty"`
+	ApprovedBy      string           `json:"approvedBy,omitempty"`
+	ApprovalMessage string           `json:"approvalMessage,omitempty"`
+	CreatedAt       time.Time        `json:"createdAt"`
+	UpdatedAt       time.Time        `json:"updatedAt"`
+	ReleasedAt      *time.Time       `json:"releasedAt,omitempty"`
 }
 
 // Pipeline 发布流水线接口。

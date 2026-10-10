@@ -34,7 +34,7 @@ trap cleanup EXIT INT TERM
 if [ "$NO_BUILD" != "true" ]; then
   log "编译全部服务二进制 → $BIN_DIR"
   mkdir -p "$BIN_DIR"
-  for svc in modelregistry k8sadapter controlplane gateway observability inference; do
+  for svc in modelregistry k8sadapter controlplane gateway observability inference pipeline; do
     (cd "$ROOT/services/$svc" && go build -o "$BIN_DIR/$svc" ./cmd)
     echo "编译 $svc OK"
   done
@@ -42,7 +42,7 @@ fi
 
 # ---------- 2. 启动 6 个服务 ----------
 log "启动 modelregistry :8081(storage=$STORAGE)"
-"$BIN_DIR/modelregistry" --addr :8081 --storage "$STORAGE" &
+"$BIN_DIR/modelregistry" --addr :8081 --storage "$STORAGE" --pipeline-token local-pipeline-token &
 PIDS+=($!)
 
 log "启动 k8sadapter :8082（Fake 集群，2 节点 × 8 卡 A100）"
@@ -74,6 +74,13 @@ log "启动 inference :8085（Mock vLLM）"
 "$BIN_DIR/inference" --addr :8085 --model qwen-demo &
 PIDS+=($!)
 
+log "启动 pipeline :8086(storage=$STORAGE)"
+"$BIN_DIR/pipeline" --addr :8086 --storage "$STORAGE" \
+  --model-registry http://127.0.0.1:8081 \
+  --probe-url http://127.0.0.1:8085 \
+  --pipeline-token local-pipeline-token &
+PIDS+=($!)
+
 # ---------- 3. 等待就绪 ----------
 log "等待全部服务就绪"
 for i in $(seq 1 30); do
@@ -86,10 +93,11 @@ for i in $(seq 1 30); do
   code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8083/v1/models 2>/dev/null || true)
   [ "$code" = "401" ] && ok=$((ok+1))
   curl -sf http://127.0.0.1:8085/v1/models >/dev/null 2>&1 && ok=$((ok+1))
-  [ "$ok" -ge 6 ] && break
+  curl -sf http://127.0.0.1:8086/healthz >/dev/null 2>&1 && ok=$((ok+1))
+  [ "$ok" -ge 7 ] && break
   sleep 1
 done
-[ "$ok" -ge 6 ] || { echo "服务未全部就绪 (ok=$ok/6)"; exit 1; }
+[ "$ok" -ge 7 ] || { echo "服务未全部就绪 (ok=$ok/7)"; exit 1; }
 
 log "全部就绪 🎉"
 echo "  控制面   http://localhost:8080"
@@ -98,6 +106,7 @@ echo "  k8sadapter     http://localhost:8082"
 echo "  gateway        http://localhost:8083"
 echo "  observability  http://localhost:8084"
 echo "  inference      http://localhost:8085"
+echo "  pipeline       http://localhost:8086"
 echo "  前端（需另起）: cd frontend && npm run dev  → http://localhost:5173"
 echo ""
 echo "按 Ctrl-C 停止全部服务"

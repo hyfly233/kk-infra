@@ -26,6 +26,7 @@ func MigrateAll(db *sql.DB) error {
 		"migrations/007_usage_billing.sql",
 		"migrations/008_gateway_route_model.sql",
 		"migrations/009_artifact_metadata.sql",
+		"migrations/010_release_records.sql",
 	})
 }
 

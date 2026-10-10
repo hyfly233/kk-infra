@@ -10,6 +10,7 @@ MR=http://127.0.0.1:8081
 GW=http://127.0.0.1:8083
 OBS=http://127.0.0.1:8084
 INF=http://127.0.0.1:8085
+PIPELINE=http://127.0.0.1:8086
 
 log() { echo -e "\n\033[1;36m=== $* ===\033[0m"; }
 fail() { echo -e "\033[1;31mFAIL: $*\033[0m"; exit 1; }
@@ -26,6 +27,7 @@ check_ready "$MR/api/v1/models" 200 || fail "服务未就绪: $MR"
 check_ready "$GW/v1/models" 401 || fail "服务未就绪: $GW（gateway 需 401 鉴权）"
 check_ready "$OBS/api/v1/gpus/metrics" 200 || fail "服务未就绪: $OBS"
 check_ready "$INF/v1/models" 200 || fail "服务未就绪: $INF"
+check_ready "$PIPELINE/healthz" 200 || fail "服务未就绪: $PIPELINE"
 echo "全部服务就绪"
 
 # ---------- 1.5 清理上次残留（幂等可重跑） ----------
@@ -66,8 +68,10 @@ MODEL_ID=$(curl -s "$MR/api/v1/models" | json_field "['data'][0]['id']")
 VER_JSON=$(curl -s -X POST "$MR/api/v1/models/$MODEL_ID/versions" -H 'Content-Type: application/json' \
   -d '{"version":"7b","artifactUri":"s3://models/qwen-7b","runtime":"vLLM","gpuType":"A100","gpuCount":1,"memoryMB":2048,"contextLength":8192}')
 VERSION_ID=$(echo "$VER_JSON" | json_field "['data']['id']")
-curl -s -X POST "$MR/api/v1/versions/$VERSION_ID/validate" >/dev/null
-curl -s -X POST "$MR/api/v1/versions/$VERSION_ID/release" >/dev/null
+RELEASE_ID=$(curl -s -X POST "$PIPELINE/api/v1/releases" -H 'Content-Type: application/json' \
+  -d "{\"modelVersionId\":\"$VERSION_ID\",\"operator\":\"e2e\"}" | json_field "['data']['id']")
+curl -s -X POST "$PIPELINE/api/v1/releases/$RELEASE_ID/approval" -H 'Content-Type: application/json' \
+  -d '{"approver":"e2e-admin","approved":true,"message":"E2E approval"}' >/dev/null
 echo "版本已校验并发布 (RELEASED)"
 
 # ---------- 4. 创建部署 ----------

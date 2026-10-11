@@ -14,7 +14,7 @@ type ModelDeployment struct {
 	TenantID       string    `json:"tenantId"`       // 租户
 	Namespace      string    `json:"namespace"`      // K8s Namespace
 	Replicas       int32     `json:"replicas"`       // 期望副本数
-	Resource       Resource   `json:"resource"`      // 单副本资源规格
+	Resource       Resource  `json:"resource"`       // 单副本资源规格
 	Runtime        string    `json:"runtime"`        // 运行时，如 vLLM
 	StartupArgs    []string  `json:"startupArgs"`    // 启动参数（vLLM extra args）
 	Endpoint       string    `json:"endpoint"`       // 服务成功后返回的 API Endpoint
@@ -42,11 +42,20 @@ const (
 // StatusEvent 状态变更事件，用于审计与诊断
 type StatusEvent struct {
 	DeploymentID string    `json:"deploymentId"`
-	From         string    `json:"from"`  // 变更前状态
-	To           string    `json:"to"`    // 变更后状态
+	From         string    `json:"from"`   // 变更前状态
+	To           string    `json:"to"`     // 变更后状态
 	Reason       string    `json:"reason"` // 触发原因
 	RequestID    string    `json:"requestId"`
 	Diagnostics  string    `json:"diagnostics,omitempty"` // 错误诊断
 	ResourceVer  string    `json:"resourceVer,omitempty"` // K8s 资源版本
 	At           time.Time `json:"at"`
+}
+
+type DeploymentRevision struct {
+	ID             string    `json:"id"`
+	DeploymentID   string    `json:"deploymentId"`
+	Generation     int64     `json:"generation"`
+	ModelVersionID string    `json:"modelVersionId"`
+	ModelVersion   string    `json:"modelVersion"`
+	CreatedAt      time.Time `json:"createdAt"`
 }

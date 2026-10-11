@@ -177,6 +177,28 @@ func (r *PostgresDeploymentRepository) Events(deploymentID string) []domain.Stat
 	return out
 }
 
+func (r *PostgresDeploymentRepository) AddRevision(v *domain.DeploymentRevision) error {
+	_, err := r.db.Exec(`INSERT INTO deployment_revisions (id,deployment_id,generation,model_version_id,model_version,created_at) VALUES ($1,$2,$3,$4,$5,$6)`, v.ID, v.DeploymentID, v.Generation, v.ModelVersionID, v.ModelVersion, v.CreatedAt)
+	return mapDeployErr(err)
+}
+
+func (r *PostgresDeploymentRepository) Revisions(deploymentID string) ([]domain.DeploymentRevision, error) {
+	rows, err := r.db.Query(`SELECT id,deployment_id,generation,model_version_id,model_version,created_at FROM deployment_revisions WHERE deployment_id=$1 ORDER BY generation DESC`, deploymentID)
+	if err != nil {
+		return nil, mapDeployErr(err)
+	}
+	defer rows.Close()
+	out := []domain.DeploymentRevision{}
+	for rows.Next() {
+		var v domain.DeploymentRevision
+		if err := rows.Scan(&v.ID, &v.DeploymentID, &v.Generation, &v.ModelVersionID, &v.ModelVersion, &v.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
 // mustJSON 序列化 JSON，失败返回 "[]"
 func mustJSON(v interface{}) string {
 	b, err := json.Marshal(v)

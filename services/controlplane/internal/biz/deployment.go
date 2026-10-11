@@ -3,6 +3,7 @@ package biz
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -168,6 +169,9 @@ func (uc *DeploymentUseCase) CreateDeployment(ctx context.Context, req *apitypes
 			return uc.repo.GetByName(req.Name)
 		}
 		return nil, errcode.Wrap(errcode.ErrInternal, "写入部署失败", err)
+	}
+	if err := uc.recordRevision(d); err != nil {
+		return nil, errcode.Wrap(errcode.ErrInternal, "记录部署修订失败", err)
 	}
 	uc.recordEvent(d.ID, "", domain.DeploymentStatusNew, "创建部署请求", getRequestID(ctx), "")
 	// R2-4：审计
@@ -508,6 +512,10 @@ func (uc *DeploymentUseCase) UpgradeDeployment(ctx context.Context, id, newVersi
 		uc.failDeployment(id, "升级失败: "+err.Error())
 		return nil, errcode.Wrap(errcode.ErrInternal, "升级失败", err)
 	}
+	if err := uc.recordRevision(updated); err != nil {
+		uc.failDeployment(id, "记录升级修订失败: "+err.Error())
+		return nil, errcode.Wrap(errcode.ErrInternal, "记录升级修订失败", err)
+	}
 	uc.transition(id, domain.DeploymentStatusRestarting, domain.DeploymentStatusRunning, "升级完成")
 	uc.SyncFromK8s(ctx, id)
 
@@ -517,6 +525,55 @@ func (uc *DeploymentUseCase) UpgradeDeployment(ctx context.Context, id, newVersi
 			"升级部署 "+d.Name+" 到版本 "+version.Version)
 	}
 	return uc.repo.Get(id)
+}
+
+func (uc *DeploymentUseCase) RollbackDeployment(ctx context.Context, id, revisionID string) (*domain.ModelDeployment, error) {
+	d, err := uc.repo.Get(id)
+	if err != nil {
+		return nil, errcode.Wrap(errcode.ErrNotFound, "部署不存在: "+id, err)
+	}
+	if d.Status != domain.DeploymentStatusRunning {
+		return nil, errcode.New(errcode.ErrIllegalState, "当前状态 "+d.Status+" 不允许回滚")
+	}
+	revisions, err := uc.repo.Revisions(id)
+	if err != nil {
+		return nil, errcode.Wrap(errcode.ErrInternal, "读取修订历史失败", err)
+	}
+	var target *domain.DeploymentRevision
+	for i := range revisions {
+		candidate := &revisions[i]
+		if revisionID != "" && candidate.ID == revisionID {
+			target = candidate
+			break
+		}
+		if revisionID == "" && candidate.ModelVersionID != d.ModelVersionID {
+			target = candidate
+			break
+		}
+	}
+	if target == nil {
+		return nil, errcode.New(errcode.ErrNotFound, "没有可回滚的部署修订")
+	}
+	if target.ModelVersionID == d.ModelVersionID {
+		return nil, errcode.New(errcode.ErrBadRequest, "目标修订与当前版本相同")
+	}
+	result, err := uc.UpgradeDeployment(ctx, id, target.ModelVersionID)
+	if err != nil {
+		return nil, err
+	}
+	uc.recordEvent(id, domain.DeploymentStatusRunning, domain.DeploymentStatusRunning, "回滚到修订 "+target.ID, getRequestID(ctx), "")
+	if uc.audit != nil {
+		uc.audit.Record("deployment.rollback", "console", d.TenantID, id, getRequestID(ctx), "回滚部署 "+d.Name+" 到修订 "+target.ID)
+	}
+	return result, nil
+}
+
+func (uc *DeploymentUseCase) Revisions(id string) ([]domain.DeploymentRevision, error) {
+	return uc.repo.Revisions(id)
+}
+
+func (uc *DeploymentUseCase) recordRevision(d *domain.ModelDeployment) error {
+	return uc.repo.AddRevision(&domain.DeploymentRevision{ID: fmt.Sprintf("%s-r%d", d.ID, d.Generation), DeploymentID: d.ID, Generation: d.Generation, ModelVersionID: d.ModelVersionID, ModelVersion: d.ModelVersion, CreatedAt: uc.now().UTC()})
 }
 
 // DeleteDeployment 删除部署（幂等：不存在返回成功）

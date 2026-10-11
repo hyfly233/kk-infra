@@ -26,24 +26,57 @@ type DeploymentRepository interface {
 	// 事件
 	AddEvent(e *domain.StatusEvent)
 	Events(deploymentID string) []domain.StatusEvent
+	AddRevision(*domain.DeploymentRevision) error
+	Revisions(deploymentID string) ([]domain.DeploymentRevision, error)
 }
 
 // MemoryDeploymentRepository 内存实现
 type MemoryDeploymentRepository struct {
-	mu      sync.RWMutex
-	deploys map[string]*domain.ModelDeployment
-	byName  map[string]string // name → id
-	events  map[string][]domain.StatusEvent
-	seq     int
+	mu        sync.RWMutex
+	deploys   map[string]*domain.ModelDeployment
+	byName    map[string]string // name → id
+	events    map[string][]domain.StatusEvent
+	revisions map[string][]domain.DeploymentRevision
+	seq       int
 }
 
 // NewMemoryDeploymentRepository 创建内存仓库
 func NewMemoryDeploymentRepository() *MemoryDeploymentRepository {
 	return &MemoryDeploymentRepository{
-		deploys: make(map[string]*domain.ModelDeployment),
-		byName:  make(map[string]string),
-		events:  make(map[string][]domain.StatusEvent),
+		deploys:   make(map[string]*domain.ModelDeployment),
+		byName:    make(map[string]string),
+		events:    make(map[string][]domain.StatusEvent),
+		revisions: make(map[string][]domain.DeploymentRevision),
 	}
+}
+
+func (r *MemoryDeploymentRepository) AddRevision(revision *domain.DeploymentRevision) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.deploys[revision.DeploymentID]; !ok {
+		return ErrNotFound
+	}
+	for _, existing := range r.revisions[revision.DeploymentID] {
+		if existing.Generation == revision.Generation {
+			return ErrConflict
+		}
+	}
+	r.revisions[revision.DeploymentID] = append(r.revisions[revision.DeploymentID], *revision)
+	return nil
+}
+
+func (r *MemoryDeploymentRepository) Revisions(deploymentID string) ([]domain.DeploymentRevision, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if _, ok := r.deploys[deploymentID]; !ok {
+		return nil, ErrNotFound
+	}
+	source := r.revisions[deploymentID]
+	out := make([]domain.DeploymentRevision, len(source))
+	for i := range source {
+		out[len(source)-1-i] = source[i]
+	}
+	return out, nil
 }
 
 func (r *MemoryDeploymentRepository) Create(d *domain.ModelDeployment) error {

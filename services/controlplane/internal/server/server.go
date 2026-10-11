@@ -73,6 +73,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/deployments/{id}/scale", s.handleScaleDeployment)
 	mux.HandleFunc("POST /api/v1/deployments/{id}/restart", s.handleRestartDeployment)
 	mux.HandleFunc("POST /api/v1/deployments/{id}/upgrade", s.handleUpgradeDeployment)
+	mux.HandleFunc("POST /api/v1/deployments/{id}/rollback", s.handleRollbackDeployment)
+	mux.HandleFunc("GET /api/v1/deployments/{id}/revisions", s.handleDeploymentRevisions)
 	mux.HandleFunc("DELETE /api/v1/deployments/{id}", s.handleDeleteDeployment)
 	mux.HandleFunc("GET /api/v1/deployments/{id}/metrics", s.handleDeploymentMetrics)
 
@@ -466,6 +468,32 @@ func (s *Server) handleUpgradeDeployment(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	apitypes.WriteResult(w, r, d, nil)
+}
+
+func (s *Server) handleRollbackDeployment(w http.ResponseWriter, r *http.Request) {
+	d, err := s.deployments.GetDeployment(r.PathValue("id"))
+	if err != nil || !canAccessTenant(r.Context(), d.TenantID) {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrNotFound, "部署不存在"))
+		return
+	}
+	var req struct {
+		RevisionID string `json:"revisionId"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+	result, err := s.deployments.RollbackDeployment(r.Context(), d.ID, req.RevisionID)
+	apitypes.WriteResult(w, r, result, err)
+}
+
+func (s *Server) handleDeploymentRevisions(w http.ResponseWriter, r *http.Request) {
+	d, err := s.deployments.GetDeployment(r.PathValue("id"))
+	if err != nil || !canAccessTenant(r.Context(), d.TenantID) {
+		apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrNotFound, "部署不存在"))
+		return
+	}
+	revisions, err := s.deployments.Revisions(d.ID)
+	apitypes.WriteResult(w, r, revisions, err)
 }
 
 func (s *Server) handleDeleteDeployment(w http.ResponseWriter, r *http.Request) {

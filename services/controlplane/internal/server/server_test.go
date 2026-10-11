@@ -25,7 +25,7 @@ func (m *mockModelClient) GetVersion(ctx context.Context, versionID string) (*do
 		ID:             versionID,
 		ModelID:        "m1",
 		ModelName:      "qwen",
-		Version:        "7b",
+		Version:        versionID,
 		ArtifactURI:    "s3://models/qwen-7b",
 		ArtifactDigest: "sha256:0123456789abcdef",
 		Runtime:        domain.RuntimeVLLM,
@@ -277,6 +277,46 @@ func TestGPUResources(t *testing.T) {
 	}
 	if int32(summary["totalGpu"].(float64)) != 8 {
 		t.Fatalf("GPU 总量错误: %v", summary["totalGpu"])
+	}
+}
+
+func TestDeploymentRollbackUsesPersistedRevision(t *testing.T) {
+	h, _ := newTestServer(t)
+	resp, code := doJSON(t, h, http.MethodPost, "/api/v1/deployments", apitypes.CreateDeploymentRequest{IdempotencyKey: "rollback-d1", Name: "rollback-demo", ModelVersionID: "v1", Replicas: 1})
+	if code != http.StatusOK {
+		t.Fatalf("create failed: %d %s", code, resp.Message)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		resp, code = doJSON(t, h, http.MethodGet, "/api/v1/deployments/rollback-d1", nil)
+		if code == http.StatusOK && resp.Data.(map[string]interface{})["status"] == "RUNNING" {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	resp, code = doJSON(t, h, http.MethodPost, "/api/v1/deployments/rollback-d1/upgrade", map[string]string{"modelVersionId": "v2"})
+	if code != http.StatusOK {
+		t.Fatalf("upgrade failed: %d %s", code, resp.Message)
+	}
+	resp, code = doJSON(t, h, http.MethodGet, "/api/v1/deployments/rollback-d1/revisions", nil)
+	if code != http.StatusOK {
+		t.Fatalf("revisions failed: %d %s", code, resp.Message)
+	}
+	revisions := resp.Data.([]interface{})
+	if len(revisions) != 2 {
+		t.Fatalf("expected 2 revisions: %+v", revisions)
+	}
+	resp, code = doJSON(t, h, http.MethodPost, "/api/v1/deployments/rollback-d1/rollback", map[string]string{})
+	if code != http.StatusOK {
+		t.Fatalf("rollback failed: %d %s", code, resp.Message)
+	}
+	deployment := resp.Data.(map[string]interface{})
+	if deployment["modelVersionId"] != "v1" {
+		t.Fatalf("rollback target mismatch: %+v", deployment)
+	}
+	resp, code = doJSON(t, h, http.MethodGet, "/api/v1/deployments/rollback-d1/revisions", nil)
+	if code != http.StatusOK || len(resp.Data.([]interface{})) != 3 {
+		t.Fatalf("rollback revision not persisted: %+v", resp.Data)
 	}
 }
 

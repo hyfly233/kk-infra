@@ -508,15 +508,18 @@ func (uc *DeploymentUseCase) UpgradeDeployment(ctx context.Context, id, newVersi
 		ArtifactURI:    artifactURI,
 		ArtifactDigest: artifactDigest,
 	}
-	if _, err := uc.kube.UpdateDeployment(ctx, spec); err != nil {
+	res, err := uc.kube.UpdateDeployment(ctx, spec)
+	if err != nil {
 		uc.failDeployment(id, "升级失败: "+err.Error())
 		return nil, errcode.Wrap(errcode.ErrInternal, "升级失败", err)
 	}
-	if err := uc.recordRevision(updated); err != nil {
-		uc.failDeployment(id, "记录升级修订失败: "+err.Error())
-		return nil, errcode.Wrap(errcode.ErrInternal, "记录升级修订失败", err)
+	if res.Status != nil && res.Status.Condition == "Available" {
+		if err := uc.recordRevision(updated); err != nil && err != data.ErrConflict {
+			uc.failDeployment(id, "记录升级修订失败: "+err.Error())
+			return nil, errcode.Wrap(errcode.ErrInternal, "记录升级修订失败", err)
+		}
+		uc.transition(id, domain.DeploymentStatusRestarting, domain.DeploymentStatusRunning, "升级完成")
 	}
-	uc.transition(id, domain.DeploymentStatusRestarting, domain.DeploymentStatusRunning, "升级完成")
 	uc.SyncFromK8s(ctx, id)
 
 	// 审计
@@ -633,6 +636,9 @@ func (uc *DeploymentUseCase) SyncFromK8s(ctx context.Context, id string) {
 	}
 	switch res.Status.Condition {
 	case "Available":
+		if d.Status == domain.DeploymentStatusRestarting {
+			_ = uc.recordRevision(d)
+		}
 		if uc.sm.CanTransition(d.Status, domain.DeploymentStatusRunning) {
 			uc.transition(id, d.Status, domain.DeploymentStatusRunning, "Pod 就绪")
 		}
@@ -646,7 +652,37 @@ func (uc *DeploymentUseCase) SyncFromK8s(ctx context.Context, id string) {
 		if diag == "" {
 			diag = "Pod 运行失败"
 		}
+		uc.restoreLastStableRevision(ctx, d)
 		uc.failDeployment(id, diag)
+	}
+}
+
+func (uc *DeploymentUseCase) restoreLastStableRevision(ctx context.Context, d *domain.ModelDeployment) {
+	revisions, err := uc.repo.Revisions(d.ID)
+	if err != nil {
+		return
+	}
+	for _, revision := range revisions {
+		if revision.ModelVersionID == d.ModelVersionID {
+			continue
+		}
+		version, err := uc.models.GetVersion(ctx, revision.ModelVersionID)
+		if err != nil {
+			return
+		}
+		uc.updateDeployment(d.ID, func(current *domain.ModelDeployment) {
+			current.ModelVersionID = version.ID
+			current.ModelID = version.ModelID
+			current.ModelName = version.ModelName
+			current.ModelVersion = version.Version
+			current.Runtime = version.Runtime
+			current.Resource = domain.Resource{GPUType: version.GPUType, GPUCount: version.GPUCount, MemoryMB: version.MemoryMB}
+		})
+		restored, err := uc.repo.Get(d.ID)
+		if err == nil {
+			_ = uc.recordRevision(restored)
+		}
+		return
 	}
 }
 

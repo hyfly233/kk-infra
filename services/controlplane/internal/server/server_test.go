@@ -38,12 +38,13 @@ func (m *mockModelClient) GetVersion(ctx context.Context, versionID string) (*do
 
 // mockKubeClient 模拟 k8sadapter：简单内存部署
 type mockKubeClient struct {
-	deploys  map[string]int32 // name → ready 数
-	lastSpec *clients.CreateDeploymentSpec
+	deploys   map[string]int32 // name → ready 数
+	lastSpec  *clients.CreateDeploymentSpec
+	condition string
 }
 
 func newMockKube() *mockKubeClient {
-	return &mockKubeClient{deploys: make(map[string]int32)}
+	return &mockKubeClient{deploys: make(map[string]int32), condition: "Available"}
 }
 
 func (m *mockKubeClient) ListGPUs(ctx context.Context) ([]domain.GPUResource, error) {
@@ -101,7 +102,7 @@ func (m *mockKubeClient) GetDeployment(ctx context.Context, name, namespace stri
 	}
 	return &clients.K8sDeploymentResult{
 		DeploymentID: name,
-		Status:       &clients.K8sDeploymentStatus{Replicas: r, ReadyReplicas: r, Condition: "Available"},
+		Status:       &clients.K8sDeploymentStatus{Replicas: r, ReadyReplicas: r, Condition: m.condition, Message: "analysis failed"},
 		Endpoint:     name + ".svc.cluster.local",
 	}, nil
 }
@@ -317,6 +318,36 @@ func TestDeploymentRollbackUsesPersistedRevision(t *testing.T) {
 	resp, code = doJSON(t, h, http.MethodGet, "/api/v1/deployments/rollback-d1/revisions", nil)
 	if code != http.StatusOK || len(resp.Data.([]interface{})) != 3 {
 		t.Fatalf("rollback revision not persisted: %+v", resp.Data)
+	}
+}
+
+func TestFailedRolloutRestoresStableRevision(t *testing.T) {
+	repo := data.NewMemoryDeploymentRepository()
+	kube := newMockKube()
+	useCase := biz.NewDeploymentUseCase(repo, &mockModelClient{}, kube)
+	_, err := useCase.CreateDeployment(context.Background(), &apitypes.CreateDeploymentRequest{IdempotencyKey: "failed-rollout", Name: "failed-rollout", ModelVersionID: "v1", Replicas: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		d, _ := repo.Get("failed-rollout")
+		if d.Status == domain.DeploymentStatusRunning {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	kube.condition = "ReplicaFailure"
+	result, err := useCase.UpgradeDeployment(context.Background(), "failed-rollout", "v2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != domain.DeploymentStatusFailed || result.ModelVersionID != "v1" {
+		t.Fatalf("stable revision was not restored: %+v", result)
+	}
+	revisions, err := repo.Revisions("failed-rollout")
+	if err != nil || len(revisions) != 2 || revisions[0].ModelVersionID != "v1" {
+		t.Fatalf("restored revision missing: %+v err=%v", revisions, err)
 	}
 }
 

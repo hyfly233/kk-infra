@@ -53,3 +53,24 @@ func TestReconcileScaledObjectDisabledDoesNotCallAPI(t *testing.T) {
 		t.Fatalf("disabled KEDA made %d calls", calls)
 	}
 }
+
+func TestReconcileScaledObjectTargetsRollout(t *testing.T) {
+	var posted map[string]interface{}
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_ = json.NewDecoder(r.Body).Decode(&posted)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer api.Close()
+	c := &RealKubeClient{baseURL: api.URL, httpClient: api.Client(), kedaEnabled: true, progressiveEnabled: true, prometheusURL: "http://prometheus:9090"}
+	if err := c.reconcileScaledObject(context.Background(), &DeploymentSpec{Name: "qwen", DeploymentID: "d1", Labels: map[string]string{"carrot.ai/tenant-id": "t1"}}, "tenant-t1"); err != nil {
+		t.Fatal(err)
+	}
+	target := posted["spec"].(map[string]interface{})["scaleTargetRef"].(map[string]interface{})
+	if target["kind"] != "Rollout" || target["apiVersion"] != "argoproj.io/v1alpha1" {
+		t.Fatalf("unexpected target: %+v", target)
+	}
+}

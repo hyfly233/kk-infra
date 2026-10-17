@@ -47,7 +47,7 @@ func renderProgressiveManifests(spec *DeploymentSpec, base *deployManifests, pro
 	virtual := map[string]any{
 		"apiVersion": "networking.istio.io/v1beta1", "kind": "VirtualService",
 		"metadata": map[string]any{"name": virtualName, "namespace": namespace, "labels": labels},
-		"spec": map[string]any{"hosts": []string{name + "-rollout"}, "http": []map[string]any{{"name": routeName, "route": []map[string]any{
+		"spec": map[string]any{"hosts": []string{name}, "http": []map[string]any{{"name": routeName, "route": []map[string]any{
 			{"destination": map[string]any{"host": stableName}, "weight": 100}, {"destination": map[string]any{"host": canaryName}, "weight": 0},
 		}}}},
 	}

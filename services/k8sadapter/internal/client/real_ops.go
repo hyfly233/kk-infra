@@ -157,9 +157,11 @@ type deploymentList struct {
 			Replicas int32 `json:"replicas"`
 		} `json:"spec"`
 		Status struct {
-			Replicas          int32 `json:"replicas"`
-			ReadyReplicas     int32 `json:"readyReplicas"`
-			AvailableReplicas int32 `json:"availableReplicas"`
+			Phase             string `json:"phase"`
+			Message           string `json:"message"`
+			Replicas          int32  `json:"replicas"`
+			ReadyReplicas     int32  `json:"readyReplicas"`
+			AvailableReplicas int32  `json:"availableReplicas"`
 			Conditions        []struct {
 				Type    string `json:"type"`
 				Status  string `json:"status"`
@@ -204,6 +206,22 @@ func (c *RealKubeClient) CreateDeployment(ctx context.Context, spec *DeploymentS
 			return nil, fmt.Errorf("创建 artifact Secret 失败: %w", err)
 		}
 	}
+	if c.progressiveEnabled {
+		progressive, err := renderProgressiveManifests(spec, res, c.prometheusURL)
+		if err != nil {
+			return nil, err
+		}
+		if err := c.ensureProgressiveResources(ctx, spec, ns, res.Service, progressive); err != nil {
+			return nil, err
+		}
+		if err := c.do(ctx, "POST", "/apis/argoproj.io/v1alpha1/namespaces/"+ns+"/rollouts", progressive.Rollout, nil); err != nil {
+			return nil, fmt.Errorf("创建 Rollout 失败: %w", err)
+		}
+		if err := c.reconcileScaledObject(ctx, spec, ns); err != nil {
+			return nil, err
+		}
+		return c.GetDeployment(ctx, spec.Name, ns)
+	}
 
 	// 创建 Deployment
 	if err := c.do(ctx, "POST", "/apis/apps/v1/namespaces/"+ns+"/deployments", res.Deployment, nil); err != nil {
@@ -240,6 +258,23 @@ func (c *RealKubeClient) UpdateDeployment(ctx context.Context, spec *DeploymentS
 			return nil, fmt.Errorf("更新 artifact Secret 失败: %w", err)
 		}
 	}
+	if c.progressiveEnabled {
+		progressive, err := renderProgressiveManifests(spec, res, c.prometheusURL)
+		if err != nil {
+			return nil, err
+		}
+		if err := c.ensureProgressiveResources(ctx, spec, ns, res.Service, progressive); err != nil {
+			return nil, err
+		}
+		patch := map[string]interface{}{"metadata": map[string]interface{}{"labels": res.Deployment.Metadata.Labels}, "spec": progressive.Rollout["spec"]}
+		if err := c.do(ctx, "PATCH", "/apis/argoproj.io/v1alpha1/namespaces/"+ns+"/rollouts/"+spec.Name, patch, nil); err != nil {
+			return nil, fmt.Errorf("更新 Rollout 失败: %w", err)
+		}
+		if err := c.reconcileScaledObject(ctx, spec, ns); err != nil {
+			return nil, err
+		}
+		return c.GetDeployment(ctx, spec.Name, ns)
+	}
 	patch := map[string]interface{}{
 		"metadata": map[string]interface{}{"labels": res.Deployment.Metadata.Labels},
 		"spec":     res.Deployment.Spec,
@@ -267,9 +302,11 @@ func (c *RealKubeClient) GetDeployment(ctx context.Context, name, namespace stri
 			Replicas int32 `json:"replicas"`
 		} `json:"spec"`
 		Status struct {
-			Replicas          int32 `json:"replicas"`
-			ReadyReplicas     int32 `json:"readyReplicas"`
-			AvailableReplicas int32 `json:"availableReplicas"`
+			Phase             string `json:"phase"`
+			Message           string `json:"message"`
+			Replicas          int32  `json:"replicas"`
+			ReadyReplicas     int32  `json:"readyReplicas"`
+			AvailableReplicas int32  `json:"availableReplicas"`
 			Conditions        []struct {
 				Type    string `json:"type"`
 				Status  string `json:"status"`
@@ -278,14 +315,18 @@ func (c *RealKubeClient) GetDeployment(ctx context.Context, name, namespace stri
 			} `json:"conditions"`
 		} `json:"status"`
 	}
-	err := c.do(ctx, "GET", "/apis/apps/v1/namespaces/"+ns+"/deployments/"+name, nil, &dep)
+	resourcePath, resourceName := "/apis/apps/v1/namespaces/"+ns+"/deployments/"+name, "Deployment"
+	if c.progressiveEnabled {
+		resourcePath = "/apis/argoproj.io/v1alpha1/namespaces/" + ns + "/rollouts/" + name
+		resourceName = "Rollout"
+	}
+	err := c.do(ctx, "GET", resourcePath, nil, &dep)
 	if err != nil {
 		if err == ErrNotFound {
 			return nil, ErrNotFound
 		}
-		return nil, fmt.Errorf("查询 Deployment 失败: %w", err)
+		return nil, fmt.Errorf("查询 %s 失败: %w", resourceName, err)
 	}
-
 	// 状态推导
 	st := &k8s.DeploymentStatus{
 		Replicas:          dep.Spec.Replicas,
@@ -305,6 +346,15 @@ func (c *RealKubeClient) GetDeployment(ctx context.Context, name, namespace stri
 			if st.Message == "" {
 				st.Message = cond.Reason
 			}
+		}
+	}
+	if c.progressiveEnabled {
+		switch dep.Status.Phase {
+		case "Healthy":
+			st.Condition = "Available"
+		case "Degraded":
+			st.Condition = "ReplicaFailure"
+			st.Message = dep.Status.Message
 		}
 	}
 
@@ -331,6 +381,9 @@ func (c *RealKubeClient) ListDeployments(ctx context.Context, namespace string) 
 	var list deploymentList
 	labelSelector := "carrot.ai%2Fmanaged-by%3Dcarrot"
 	path := "/apis/apps/v1/namespaces/" + ns + "/deployments?labelSelector=" + labelSelector
+	if c.progressiveEnabled {
+		path = "/apis/argoproj.io/v1alpha1/namespaces/" + ns + "/rollouts?labelSelector=" + labelSelector
+	}
 	if err := c.do(ctx, "GET", path, nil, &list); err != nil {
 		return nil, fmt.Errorf("扫描部署失败: %w", err)
 	}
@@ -355,8 +408,13 @@ func (c *RealKubeClient) ScaleDeployment(ctx context.Context, name, namespace st
 			"replicas": replicas,
 		},
 	}
-	if err := c.do(ctx, "PATCH", "/apis/apps/v1/namespaces/"+ns+"/deployments/"+name, patch, nil); err != nil {
-		return nil, fmt.Errorf("扩缩容失败: %w", err)
+	path, resourceName := "/apis/apps/v1/namespaces/"+ns+"/deployments/"+name, "Deployment"
+	if c.progressiveEnabled {
+		path = "/apis/argoproj.io/v1alpha1/namespaces/" + ns + "/rollouts/" + name
+		resourceName = "Rollout"
+	}
+	if err := c.do(ctx, "PATCH", path, patch, nil); err != nil {
+		return nil, fmt.Errorf("扩缩容 %s 失败: %w", resourceName, err)
 	}
 	return c.GetDeployment(ctx, name, ns)
 }
@@ -376,8 +434,13 @@ func (c *RealKubeClient) RestartDeployment(ctx context.Context, name, namespace 
 			},
 		},
 	}
-	if err := c.do(ctx, "PATCH", "/apis/apps/v1/namespaces/"+ns+"/deployments/"+name, patch, nil); err != nil {
-		return nil, fmt.Errorf("重启 Deployment 失败: %w", err)
+	path, resourceName := "/apis/apps/v1/namespaces/"+ns+"/deployments/"+name, "Deployment"
+	if c.progressiveEnabled {
+		path = "/apis/argoproj.io/v1alpha1/namespaces/" + ns + "/rollouts/" + name
+		resourceName = "Rollout"
+	}
+	if err := c.do(ctx, "PATCH", path, patch, nil); err != nil {
+		return nil, fmt.Errorf("重启 %s 失败: %w", resourceName, err)
 	}
 	return c.GetDeployment(ctx, name, ns)
 }
@@ -389,12 +452,23 @@ func (c *RealKubeClient) DeleteDeployment(ctx context.Context, name, namespace s
 		ns = c.namespace
 	}
 	// Deployment 不存在视为成功（幂等）
-	err := c.do(ctx, "DELETE", "/apis/apps/v1/namespaces/"+ns+"/deployments/"+name, nil, nil)
+	path, resourceName := "/apis/apps/v1/namespaces/"+ns+"/deployments/"+name, "Deployment"
+	if c.progressiveEnabled {
+		path = "/apis/argoproj.io/v1alpha1/namespaces/" + ns + "/rollouts/" + name
+		resourceName = "Rollout"
+	}
+	err := c.do(ctx, "DELETE", path, nil, nil)
 	if err != nil && err != ErrNotFound {
-		return fmt.Errorf("删除 Deployment 失败: %w", err)
+		return fmt.Errorf("删除 %s 失败: %w", resourceName, err)
 	}
 	// Service 一并删除（忽略不存在）
 	_ = c.do(ctx, "DELETE", "/api/v1/namespaces/"+ns+"/services/"+name, nil, nil)
+	if c.progressiveEnabled {
+		_ = c.do(ctx, "DELETE", "/api/v1/namespaces/"+ns+"/services/"+name+"-stable", nil, nil)
+		_ = c.do(ctx, "DELETE", "/api/v1/namespaces/"+ns+"/services/"+name+"-canary", nil, nil)
+		_ = c.do(ctx, "DELETE", "/apis/networking.istio.io/v1beta1/namespaces/"+ns+"/virtualservices/"+name+"-traffic", nil, nil)
+		_ = c.do(ctx, "DELETE", "/apis/argoproj.io/v1alpha1/namespaces/"+ns+"/analysistemplates/"+name+"-analysis", nil, nil)
+	}
 	_ = c.do(ctx, "DELETE", "/api/v1/namespaces/"+ns+"/secrets/"+name+"-artifact", nil, nil)
 	if c.kedaEnabled {
 		_ = c.do(ctx, "DELETE", "/apis/keda.sh/v1alpha1/namespaces/"+ns+"/scaledobjects/"+name, nil, nil)
@@ -411,11 +485,16 @@ func (c *RealKubeClient) reconcileScaledObject(ctx context.Context, spec *Deploy
 	}
 	tenantID := spec.Labels["carrot.ai/tenant-id"]
 	labels := fmt.Sprintf(`tenant_id="%s",deployment_id="%s"`, tenantID, spec.DeploymentID)
+	scaleTarget := map[string]string{"name": spec.Name}
+	if c.progressiveEnabled {
+		scaleTarget["apiVersion"] = "argoproj.io/v1alpha1"
+		scaleTarget["kind"] = "Rollout"
+	}
 	object := map[string]interface{}{
 		"apiVersion": "keda.sh/v1alpha1", "kind": "ScaledObject",
 		"metadata": map[string]interface{}{"name": spec.Name, "namespace": namespace, "labels": spec.Labels},
 		"spec": map[string]interface{}{
-			"scaleTargetRef": map[string]string{"name": spec.Name}, "minReplicaCount": 1, "maxReplicaCount": 8, "pollingInterval": 15, "cooldownPeriod": 300,
+			"scaleTargetRef": scaleTarget, "minReplicaCount": 1, "maxReplicaCount": 8, "pollingInterval": 15, "cooldownPeriod": 300,
 			"advanced": map[string]interface{}{"horizontalPodAutoscalerConfig": map[string]interface{}{"behavior": map[string]interface{}{"scaleDown": map[string]interface{}{"stabilizationWindowSeconds": 300}}}},
 			"triggers": []map[string]interface{}{
 				{"type": "prometheus", "metadata": map[string]string{"serverAddress": c.prometheusURL, "metricName": "carrot_inference_qps", "query": fmt.Sprintf(`sum(rate(carrot_inference_requests_total{%s}[2m]))`, labels), "threshold": "5"}},
@@ -435,6 +514,26 @@ func (c *RealKubeClient) reconcileScaledObject(ctx context.Context, spec *Deploy
 	}
 	if err := c.do(ctx, "POST", "/apis/keda.sh/v1alpha1/namespaces/"+namespace+"/scaledobjects", object, nil); err != nil {
 		return fmt.Errorf("创建 KEDA ScaledObject 失败（请确认 KEDA CRD 已安装）: %w", err)
+	}
+	return nil
+}
+
+func (c *RealKubeClient) ensureProgressiveResources(ctx context.Context, spec *DeploymentSpec, namespace string, entry *k8s.Service, resources *progressiveManifests) error {
+	objects := []struct {
+		get, create string
+		body        any
+		label       string
+	}{
+		{"/api/v1/namespaces/" + namespace + "/services/" + entry.Metadata.Name, "/api/v1/namespaces/" + namespace + "/services", entry, "入口 Service"},
+		{"/api/v1/namespaces/" + namespace + "/services/" + resources.StableService.Metadata.Name, "/api/v1/namespaces/" + namespace + "/services", resources.StableService, "stable Service"},
+		{"/api/v1/namespaces/" + namespace + "/services/" + resources.CanaryService.Metadata.Name, "/api/v1/namespaces/" + namespace + "/services", resources.CanaryService, "canary Service"},
+		{"/apis/argoproj.io/v1alpha1/namespaces/" + namespace + "/analysistemplates/" + spec.Name + "-analysis", "/apis/argoproj.io/v1alpha1/namespaces/" + namespace + "/analysistemplates", resources.AnalysisTemplate, "AnalysisTemplate"},
+		{"/apis/networking.istio.io/v1beta1/namespaces/" + namespace + "/virtualservices/" + spec.Name + "-traffic", "/apis/networking.istio.io/v1beta1/namespaces/" + namespace + "/virtualservices", resources.VirtualService, "VirtualService"},
+	}
+	for _, object := range objects {
+		if err := c.ensure(ctx, object.get, object.create, object.body); err != nil {
+			return fmt.Errorf("创建 %s 失败: %w", object.label, err)
+		}
 	}
 	return nil
 }

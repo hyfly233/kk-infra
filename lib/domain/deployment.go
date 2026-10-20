@@ -18,9 +18,12 @@ type ModelDeployment struct {
 	Runtime        string    `json:"runtime"`        // 运行时，如 vLLM
 	StartupArgs    []string  `json:"startupArgs"`    // 启动参数（vLLM extra args）
 	Endpoint       string    `json:"endpoint"`       // 服务成功后返回的 API Endpoint
-	Status         string    `json:"status"`         // 当前状态（见 statemachine.go）
-	Generation     int64     `json:"generation"`     // 变更代数，每次期望变更 +1
-	Diagnostics    string    `json:"diagnostics"`    // 失败诊断信息
+	StableEndpoint string    `json:"stableEndpoint,omitempty"`
+	CanaryEndpoint string    `json:"canaryEndpoint,omitempty"`
+	RolloutStatus  string    `json:"rolloutStatus,omitempty"`
+	Status         string    `json:"status"`      // 当前状态（见 statemachine.go）
+	Generation     int64     `json:"generation"`  // 变更代数，每次期望变更 +1
+	Diagnostics    string    `json:"diagnostics"` // 失败诊断信息
 	CreatedAt      time.Time `json:"createdAt"`
 	UpdatedAt      time.Time `json:"updatedAt"`
 }

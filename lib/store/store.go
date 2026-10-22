@@ -28,6 +28,7 @@ func MigrateAll(db *sql.DB) error {
 		"migrations/009_artifact_metadata.sql",
 		"migrations/010_release_records.sql",
 		"migrations/011_deployment_revisions.sql",
+		"migrations/012_rollout_routes.sql",
 	})
 }
 

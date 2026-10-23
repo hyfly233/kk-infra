@@ -33,7 +33,7 @@ type K8sClient interface {
 
 // GatewayClient 管理部署完成后的推理路由。
 type GatewayClient interface {
-	RegisterRoute(ctx context.Context, model, modelID, endpoint, tenantID, deploymentID string) error
+	RegisterRoute(ctx context.Context, model, modelID, endpoint, tenantID, deploymentID, stableEndpoint, canaryEndpoint, rolloutStatus string) error
 	UnregisterRoute(ctx context.Context, model string) error
 }
 type TenantState interface{ TenantActive(tenantID string) bool }
@@ -233,6 +233,9 @@ func (uc *DeploymentUseCase) submit(ctx context.Context, d *domain.ModelDeployme
 	if res.Endpoint != "" {
 		uc.updateDeployment(d.ID, func(dd *domain.ModelDeployment) {
 			dd.Endpoint = "http://" + res.Endpoint
+			dd.StableEndpoint = endpointURL(res.StableEndpoint)
+			dd.CanaryEndpoint = endpointURL(res.CanaryEndpoint)
+			dd.RolloutStatus = res.RolloutStatus
 		})
 	}
 
@@ -634,6 +637,21 @@ func (uc *DeploymentUseCase) SyncFromK8s(ctx context.Context, id string) {
 	if res.Status == nil {
 		return
 	}
+	stableEndpoint, canaryEndpoint := endpointURL(res.StableEndpoint), endpointURL(res.CanaryEndpoint)
+	if d.StableEndpoint != stableEndpoint || d.CanaryEndpoint != canaryEndpoint || d.RolloutStatus != res.RolloutStatus {
+		uc.updateDeployment(id, func(current *domain.ModelDeployment) {
+			current.StableEndpoint = stableEndpoint
+			current.CanaryEndpoint = canaryEndpoint
+			current.RolloutStatus = res.RolloutStatus
+		})
+		d, _ = uc.repo.Get(id)
+	}
+	if d.Status == domain.DeploymentStatusRestarting && uc.gateway != nil && d.Endpoint != "" {
+		if err := uc.gateway.RegisterRoute(ctx, d.Name, d.ModelID, d.Endpoint, d.TenantID, d.ID, d.StableEndpoint, d.CanaryEndpoint, d.RolloutStatus); err != nil {
+			uc.failDeployment(id, "更新网关 rollout 路由失败: "+err.Error())
+			return
+		}
+	}
 	switch res.Status.Condition {
 	case "Available":
 		if d.Status == domain.DeploymentStatusRestarting {
@@ -643,7 +661,7 @@ func (uc *DeploymentUseCase) SyncFromK8s(ctx context.Context, id string) {
 			uc.transition(id, d.Status, domain.DeploymentStatusRunning, "Pod 就绪")
 		}
 		if uc.gateway != nil && d.Endpoint != "" {
-			if err := uc.gateway.RegisterRoute(ctx, d.Name, d.ModelID, d.Endpoint, d.TenantID, d.ID); err != nil {
+			if err := uc.gateway.RegisterRoute(ctx, d.Name, d.ModelID, d.Endpoint, d.TenantID, d.ID, d.StableEndpoint, d.CanaryEndpoint, d.RolloutStatus); err != nil {
 				uc.failDeployment(id, "注册网关路由失败: "+err.Error())
 			}
 		}
@@ -655,6 +673,16 @@ func (uc *DeploymentUseCase) SyncFromK8s(ctx context.Context, id string) {
 		uc.restoreLastStableRevision(ctx, d)
 		uc.failDeployment(id, diag)
 	}
+}
+
+func endpointURL(endpoint string) string {
+	if endpoint == "" {
+		return ""
+	}
+	if strings.Contains(endpoint, "://") {
+		return endpoint
+	}
+	return "http://" + endpoint
 }
 
 func (uc *DeploymentUseCase) restoreLastStableRevision(ctx context.Context, d *domain.ModelDeployment) {

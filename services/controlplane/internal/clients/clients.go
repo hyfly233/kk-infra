@@ -158,9 +158,10 @@ func NewGatewayClient(baseURL string) *GatewayClient {
 }
 
 // RegisterRoute 注册或更新可调用模型路由。
-func (c *GatewayClient) RegisterRoute(ctx context.Context, model, modelID, endpoint, tenantID, deploymentID string) error {
+func (c *GatewayClient) RegisterRoute(ctx context.Context, model, modelID, endpoint, tenantID, deploymentID, stableEndpoint, canaryEndpoint, rolloutStatus string) error {
 	body := map[string]string{
 		"model": model, "modelId": modelID, "endpoint": endpoint, "tenantId": tenantID, "deploymentId": deploymentID,
+		"stableEndpoint": stableEndpoint, "canaryEndpoint": canaryEndpoint, "rolloutStatus": rolloutStatus,
 	}
 	return c.do(ctx, http.MethodPost, "/internal/routes", body, nil)
 }
@@ -230,13 +231,16 @@ type K8sDeploymentStatus struct {
 
 // K8sDeploymentResult 部署查询结果
 type K8sDeploymentResult struct {
-	DeploymentID string                   `json:"deploymentId"`
-	Name         string                   `json:"name"` // 部署名（k8sadapter 返回，R2-2 孤儿检测用）
-	Status       *K8sDeploymentStatus     `json:"status"`
-	Endpoint     string                   `json:"endpoint"`
-	Message      string                   `json:"message"`
-	Pods         []map[string]interface{} `json:"pods"`
-	Events       []map[string]interface{} `json:"events"`
+	DeploymentID   string                   `json:"deploymentId"`
+	Name           string                   `json:"name"` // 部署名（k8sadapter 返回，R2-2 孤儿检测用）
+	Status         *K8sDeploymentStatus     `json:"status"`
+	Endpoint       string                   `json:"endpoint"`
+	Message        string                   `json:"message"`
+	StableEndpoint string                   `json:"stableEndpoint,omitempty"`
+	CanaryEndpoint string                   `json:"canaryEndpoint,omitempty"`
+	RolloutStatus  string                   `json:"rolloutStatus,omitempty"`
+	Pods           []map[string]interface{} `json:"pods"`
+	Events         []map[string]interface{} `json:"events"`
 }
 
 // ListGPUs 查询 GPU 节点

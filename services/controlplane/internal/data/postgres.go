@@ -44,7 +44,7 @@ func scanDeployment(row interface{ Scan(...any) error }) (*domain.ModelDeploymen
 		&d.ID, &d.Name, &d.ModelID, &d.ModelVersionID, &d.ModelName, &d.ModelVersion,
 		&d.TenantID, &d.Namespace, &d.Replicas,
 		&d.Resource.GPUType, &d.Resource.GPUCount, &d.Resource.MemoryMB,
-		&d.Runtime, &startupArgs, &d.Endpoint, &d.Status, &d.Generation,
+		&d.Runtime, &startupArgs, &d.Endpoint, &d.StableEndpoint, &d.CanaryEndpoint, &d.RolloutStatus, &d.Status, &d.Generation,
 		&d.Diagnostics, &d.CreatedAt, &d.UpdatedAt,
 	); err != nil {
 		return nil, err
@@ -56,7 +56,7 @@ func scanDeployment(row interface{ Scan(...any) error }) (*domain.ModelDeploymen
 
 const deploymentCols = `id, name, model_id, model_version_id, model_name, model_version,
 	tenant_id, namespace, replicas, gpu_type, gpu_count, memory_mb,
-	runtime, startup_args, endpoint, status, generation, diagnostics, created_at, updated_at`
+	runtime, startup_args, endpoint, stable_endpoint, canary_endpoint, rollout_status, status, generation, diagnostics, created_at, updated_at`
 
 // args 序列化部署对象为 SQL 参数
 func (r *PostgresDeploymentRepository) args(d *domain.ModelDeployment) []interface{} {
@@ -65,7 +65,7 @@ func (r *PostgresDeploymentRepository) args(d *domain.ModelDeployment) []interfa
 		d.ID, d.Name, d.ModelID, d.ModelVersionID, d.ModelName, d.ModelVersion,
 		d.TenantID, d.Namespace, d.Replicas,
 		d.Resource.GPUType, d.Resource.GPUCount, d.Resource.MemoryMB,
-		d.Runtime, string(argsJSON), d.Endpoint, d.Status, d.Generation,
+		d.Runtime, string(argsJSON), d.Endpoint, d.StableEndpoint, d.CanaryEndpoint, d.RolloutStatus, d.Status, d.Generation,
 		d.Diagnostics, d.CreatedAt, d.UpdatedAt,
 	}
 }
@@ -80,7 +80,7 @@ func (r *PostgresDeploymentRepository) Create(d *domain.ModelDeployment) error {
 		}
 	}
 	_, err = r.db.Exec(
-		`INSERT INTO deployments (`+deploymentCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+		`INSERT INTO deployments (`+deploymentCols+`) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)`,
 		r.args(d)...,
 	)
 	return mapDeployErr(err)
@@ -103,12 +103,12 @@ func (r *PostgresDeploymentRepository) Update(d *domain.ModelDeployment) error {
 	_, err := r.db.Exec(
 		`UPDATE deployments SET model_id=$2, model_version_id=$3, model_name=$4, model_version=$5,
 		 tenant_id=$6, namespace=$7, replicas=$8, gpu_type=$9, gpu_count=$10, memory_mb=$11,
-		 runtime=$12, startup_args=$13, endpoint=$14, status=$15, generation=$16, diagnostics=$17, updated_at=$18
+		 runtime=$12, startup_args=$13, endpoint=$14, stable_endpoint=$15, canary_endpoint=$16, rollout_status=$17, status=$18, generation=$19, diagnostics=$20, updated_at=$21
 		 WHERE id=$1`,
 		d.ID, d.ModelID, d.ModelVersionID, d.ModelName, d.ModelVersion,
 		d.TenantID, d.Namespace, d.Replicas,
 		d.Resource.GPUType, d.Resource.GPUCount, d.Resource.MemoryMB,
-		d.Runtime, mustJSON(d.StartupArgs), d.Endpoint, d.Status, d.Generation,
+		d.Runtime, mustJSON(d.StartupArgs), d.Endpoint, d.StableEndpoint, d.CanaryEndpoint, d.RolloutStatus, d.Status, d.Generation,
 		d.Diagnostics, time.Now(),
 	)
 	return mapDeployErr(err)

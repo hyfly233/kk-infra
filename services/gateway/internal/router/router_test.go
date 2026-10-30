@@ -28,7 +28,7 @@ func (s *memoryStore) DeleteRoute(_ context.Context, model string) error {
 func TestTableRestoresAndPersistsRoutes(t *testing.T) {
 	ctx := context.Background()
 	store := &memoryStore{routes: map[string]*Route{
-		"existing": {Model: "existing", Endpoint: "http://existing", TenantID: "tenant-a"},
+		"existing": {Model: "existing", Endpoint: "http://existing", TenantID: "tenant-a", StableEndpoint: "http://stable", CanaryEndpoint: "http://canary", RolloutStatus: "Healthy"},
 	}}
 	table, err := NewTableWithStore(ctx, store)
 	if err != nil {
@@ -36,6 +36,9 @@ func TestTableRestoresAndPersistsRoutes(t *testing.T) {
 	}
 	if route, err := table.Resolve("existing"); err != nil || route.TenantID != "tenant-a" {
 		t.Fatalf("恢复路由失败: route=%+v err=%v", route, err)
+	}
+	if route, _ := table.Resolve("existing"); route.RolloutStatus != "Healthy" || route.StableEndpoint == "" || route.CanaryEndpoint == "" {
+		t.Fatalf("rollout metadata restore failed: %+v", route)
 	}
 	if err := table.Register(ctx, &Route{Model: "new", Endpoint: "http://new", TenantID: "tenant-b"}); err != nil {
 		t.Fatal(err)

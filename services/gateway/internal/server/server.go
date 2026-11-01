@@ -107,11 +107,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 // ---- 内部路由管理 ----
 
 type registerRouteReq struct {
-	Model        string `json:"model"`
-	ModelID      string `json:"modelId"`
-	Endpoint     string `json:"endpoint"`
-	TenantID     string `json:"tenantId"`
-	DeploymentID string `json:"deploymentId"`
+	Model          string `json:"model"`
+	ModelID        string `json:"modelId"`
+	Endpoint       string `json:"endpoint"`
+	TenantID       string `json:"tenantId"`
+	DeploymentID   string `json:"deploymentId"`
+	StableEndpoint string `json:"stableEndpoint"`
+	CanaryEndpoint string `json:"canaryEndpoint"`
+	RolloutStatus  string `json:"rolloutStatus"`
 }
 
 func (s *Server) handleRegisterRoute(w http.ResponseWriter, r *http.Request) {
@@ -121,11 +124,14 @@ func (s *Server) handleRegisterRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.routes.Register(r.Context(), &router.Route{
-		Model:        req.Model,
-		ModelID:      req.ModelID,
-		Endpoint:     req.Endpoint,
-		TenantID:     req.TenantID,
-		DeploymentID: req.DeploymentID,
+		Model:          req.Model,
+		ModelID:        req.ModelID,
+		Endpoint:       req.Endpoint,
+		TenantID:       req.TenantID,
+		DeploymentID:   req.DeploymentID,
+		StableEndpoint: req.StableEndpoint,
+		CanaryEndpoint: req.CanaryEndpoint,
+		RolloutStatus:  req.RolloutStatus,
 	}); err != nil {
 		apitypes.WriteResult(w, r, nil, errcode.Wrap(errcode.ErrInternal, "保存网关路由失败", err))
 		return

@@ -90,6 +90,27 @@ func setupRouteAndKey(t *testing.T, routes *router.Table, keys *auth.Manager, up
 	return res.Key, res.KeyID
 }
 
+func TestRegisterRouteKeepsRolloutMetadataWithoutWeighting(t *testing.T) {
+	h, _, routes, _ := newTestGateway(t)
+	body := `{"model":"qwen","modelId":"m1","endpoint":"http://qwen.tenant.svc","tenantId":"t1","deploymentId":"d1","stableEndpoint":"http://qwen-stable.tenant.svc","canaryEndpoint":"http://qwen-canary.tenant.svc","rolloutStatus":"Progressing"}`
+	req := httptest.NewRequest(http.MethodPost, "/internal/routes", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("register failed: %d %s", rec.Code, rec.Body.String())
+	}
+	route, err := routes.Resolve("qwen")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if route.Endpoint != "http://qwen.tenant.svc" || route.StableEndpoint == "" || route.CanaryEndpoint == "" || route.RolloutStatus != "Progressing" {
+		t.Fatalf("rollout metadata lost: %+v", route)
+	}
+	if route.Endpoint == route.StableEndpoint || route.Endpoint == route.CanaryEndpoint {
+		t.Fatalf("gateway must keep Istio entry endpoint: %+v", route)
+	}
+}
+
 // 非流式全链路：API Key 鉴权 → 路由 → 上游 → 指标
 func TestChatCompletionsNonStream(t *testing.T) {
 	upstream := httptest.NewServer(fakeUpstream())

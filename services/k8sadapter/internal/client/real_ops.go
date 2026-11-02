@@ -361,14 +361,23 @@ func (c *RealKubeClient) GetDeployment(ctx context.Context, name, namespace stri
 	pods, _ := c.listPods(ctx, ns, "app="+name)
 	events, _ := c.listEvents(ctx, ns, name)
 	endpoint := fmt.Sprintf("%s.%s.svc.cluster.local", name, ns)
+	stableEndpoint, canaryEndpoint, rolloutStatus := "", "", ""
+	if c.progressiveEnabled {
+		stableEndpoint = fmt.Sprintf("%s-stable.%s.svc.cluster.local", name, ns)
+		canaryEndpoint = fmt.Sprintf("%s-canary.%s.svc.cluster.local", name, ns)
+		rolloutStatus = dep.Status.Phase
+	}
 	return &DeploymentResult{
-		DeploymentID: dep.Metadata.Labels["carrot.ai/deployment-id"],
-		Name:         name,
-		Status:       st,
-		Pods:         pods,
-		Events:       events,
-		Endpoint:     endpoint,
-		Message:      st.Message,
+		DeploymentID:   dep.Metadata.Labels["carrot.ai/deployment-id"],
+		Name:           name,
+		Status:         st,
+		Pods:           pods,
+		Events:         events,
+		Endpoint:       endpoint,
+		Message:        st.Message,
+		StableEndpoint: stableEndpoint,
+		CanaryEndpoint: canaryEndpoint,
+		RolloutStatus:  rolloutStatus,
 	}, nil
 }
 

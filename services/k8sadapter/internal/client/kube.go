@@ -31,13 +31,16 @@ type DeploymentSpec struct {
 
 // DeploymentResult 创建/查询结果
 type DeploymentResult struct {
-	DeploymentID string                `json:"deploymentId"`
-	Name         string                `json:"name"` // 部署名（R2-2 孤儿检测用）
-	Status       *k8s.DeploymentStatus `json:"status"`
-	Pods         []k8s.Pod             `json:"pods"`
-	Events       []k8s.Event           `json:"events"`
-	Endpoint     string                `json:"endpoint"` // 服务内部 DNS 名（gateway 通过控制面获得）
-	Message      string                `json:"message"`
+	DeploymentID   string                `json:"deploymentId"`
+	Name           string                `json:"name"` // 部署名（R2-2 孤儿检测用）
+	Status         *k8s.DeploymentStatus `json:"status"`
+	Pods           []k8s.Pod             `json:"pods"`
+	Events         []k8s.Event           `json:"events"`
+	Endpoint       string                `json:"endpoint"` // 服务内部 DNS 名（gateway 通过控制面获得）
+	Message        string                `json:"message"`
+	StableEndpoint string                `json:"stableEndpoint,omitempty"`
+	CanaryEndpoint string                `json:"canaryEndpoint,omitempty"`
+	RolloutStatus  string                `json:"rolloutStatus,omitempty"`
 }
 
 // KubeClient Kubernetes 客户端接口

@@ -63,6 +63,9 @@ func TestProgressiveCRUDUsesRolloutOnly(t *testing.T) {
 	if result.Status.Condition != "Available" {
 		t.Fatalf("unexpected rollout status: %+v", result.Status)
 	}
+	if result.RolloutStatus != "Healthy" || !strings.Contains(result.StableEndpoint, "qwen-stable") || !strings.Contains(result.CanaryEndpoint, "qwen-canary") {
+		t.Fatalf("rollout routing metadata missing: %+v", result)
+	}
 	if _, err = c.UpdateDeployment(context.Background(), spec); err != nil {
 		t.Fatal(err)
 	}

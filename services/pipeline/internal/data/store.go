@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"time"
 
 	"kk-infra/services/pipeline"
 )
@@ -102,4 +103,39 @@ func nullableJSON(value any, encoded []byte) any {
 		return nil
 	}
 	return encoded
+}
+
+type AuditEntry struct {
+	Action    string
+	Actor     string
+	Resource  string
+	RequestID string
+	Detail    string
+	CreatedAt time.Time
+}
+
+type AuditStore interface {
+	Write(AuditEntry) error
+}
+
+type MemoryAuditStore struct {
+	mu      sync.Mutex
+	Entries []AuditEntry
+}
+
+func (s *MemoryAuditStore) Write(entry AuditEntry) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Entries = append(s.Entries, entry)
+	return nil
+}
+
+type PostgresAuditStore struct{ db *sql.DB }
+
+func NewPostgresAuditStore(db *sql.DB) *PostgresAuditStore { return &PostgresAuditStore{db: db} }
+
+func (s *PostgresAuditStore) Write(entry AuditEntry) error {
+	_, err := s.db.Exec(`INSERT INTO audit_logs (action, actor, resource, request_id, detail, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6)`, entry.Action, entry.Actor, entry.Resource, entry.RequestID, entry.Detail, entry.CreatedAt)
+	return err
 }

@@ -25,6 +25,7 @@ func main() {
 	flag.Parse()
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	var releaseStore data.Store = data.NewMemoryStore()
+	var auditStore data.AuditStore = &data.MemoryAuditStore{}
 	if *storageMode == "postgres" {
 		db, err := store.Open(store.DefaultConfig())
 		if err != nil {
@@ -36,8 +37,9 @@ func main() {
 			os.Exit(1)
 		}
 		releaseStore = data.NewPostgresStore(db)
+		auditStore = data.NewPostgresAuditStore(db)
 	}
-	svc := service.New(releaseStore, *registry, *probe, *token)
+	svc := service.New(releaseStore, *registry, *probe, *token, auditStore)
 	httpSrv := &http.Server{Addr: *addr, Handler: server.New(svc, logger).Handler(), ReadHeaderTimeout: 5 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

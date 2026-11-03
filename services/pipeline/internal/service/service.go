@@ -7,9 +7,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
+	"kk-infra/lib/middleware"
 	"kk-infra/services/pipeline"
 	"kk-infra/services/pipeline/internal/data"
 )
@@ -18,10 +20,15 @@ type Service struct {
 	store                                  data.Store
 	modelRegistry, probeURL, pipelineToken string
 	http                                   *http.Client
+	audit                                  data.AuditStore
 }
 
-func New(store data.Store, modelRegistry, probeURL, token string) *Service {
-	return &Service{store: store, modelRegistry: modelRegistry, probeURL: probeURL, pipelineToken: token, http: &http.Client{Timeout: 30 * time.Second}}
+func New(store data.Store, modelRegistry, probeURL, token string, audits ...data.AuditStore) *Service {
+	var audit data.AuditStore
+	if len(audits) > 0 {
+		audit = audits[0]
+	}
+	return &Service{store: store, modelRegistry: modelRegistry, probeURL: probeURL, pipelineToken: token, http: &http.Client{Timeout: 30 * time.Second}, audit: audit}
 }
 
 func id() string { b := make([]byte, 10); _, _ = rand.Read(b); return "rel-" + hex.EncodeToString(b) }
@@ -35,8 +42,9 @@ func (s *Service) Start(ctx context.Context, versionID, operator string) (*pipel
 	if err := s.store.Create(r); err != nil {
 		return nil, err
 	}
+	s.recordAudit(ctx, "release.start", operator, r.ID, "启动模型版本 "+versionID+" 的发布流水线")
 	if err := s.modelAction(ctx, versionID, "validate", false); err != nil {
-		return s.fail(r, pipeline.StageArtifactValidate, err)
+		return s.fail(ctx, r, pipeline.StageArtifactValidate, err)
 	}
 	r.StageResults = append(r.StageResults, pipeline.RunResult{Stage: pipeline.StageArtifactValidate, Status: "passed", Message: "S3 artifact 校验通过"})
 	started := time.Now()
@@ -49,13 +57,13 @@ func (s *Service) Start(ctx context.Context, versionID, operator string) (*pipel
 		if err == nil {
 			err = fmt.Errorf("探针返回 %s", resp.Status)
 		}
-		return s.fail(r, pipeline.StageProbe, err)
+		return s.fail(ctx, r, pipeline.StageProbe, err)
 	}
 	resp.Body.Close()
 	r.StageResults = append(r.StageResults, pipeline.RunResult{Stage: pipeline.StageProbe, Status: "passed", Message: "临时探针健康检查通过", DurationMs: time.Since(started).Milliseconds()})
 	bench, err := s.benchmark(ctx, versionID)
 	if err != nil {
-		return s.fail(r, pipeline.StageBenchmark, err)
+		return s.fail(ctx, r, pipeline.StageBenchmark, err)
 	}
 	r.Benchmark = bench
 	r.StageResults = append(r.StageResults, pipeline.RunResult{Stage: pipeline.StageBenchmark, Status: "passed", Message: "基准测试通过"}, pipeline.RunResult{Stage: pipeline.StageApproval, Status: "pending", Message: "等待人工审批"})
@@ -84,12 +92,13 @@ func (s *Service) Approve(ctx context.Context, id, approver, message string, app
 		r.StageResults[idx].Status = "failed"
 		r.StageResults[idx].Message = "人工拒绝: " + message
 		_ = s.store.Update(r)
+		s.recordAudit(ctx, "release.reject", approver, r.ID, "拒绝模型版本 "+r.ModelVersionID+" 的发布: "+message)
 		return r, nil
 	}
 	r.StageResults[idx].Status = "passed"
 	r.StageResults[idx].Message = "人工审批通过"
 	if err := s.modelAction(ctx, r.ModelVersionID, "release", true); err != nil {
-		return s.fail(r, pipeline.StageRelease, err)
+		return s.fail(ctx, r, pipeline.StageRelease, err)
 	}
 	now := time.Now().UTC()
 	r.Status = "RELEASED"
@@ -99,15 +108,27 @@ func (s *Service) Approve(ctx context.Context, id, approver, message string, app
 	if err := s.store.Update(r); err != nil {
 		return nil, err
 	}
+	s.recordAudit(ctx, "release.approve", approver, r.ID, "批准并发布模型版本 "+r.ModelVersionID)
 	return r, nil
 }
 func (s *Service) Get(id string) (*pipeline.ReleaseRecord, error) { return s.store.Get(id) }
-func (s *Service) fail(r *pipeline.ReleaseRecord, stage pipeline.Stage, cause error) (*pipeline.ReleaseRecord, error) {
+func (s *Service) fail(ctx context.Context, r *pipeline.ReleaseRecord, stage pipeline.Stage, cause error) (*pipeline.ReleaseRecord, error) {
 	r.Status = "FAILED"
 	r.UpdatedAt = time.Now().UTC()
 	r.StageResults = append(r.StageResults, pipeline.RunResult{Stage: stage, Status: "failed", Message: cause.Error()})
 	_ = s.store.Update(r)
+	s.recordAudit(ctx, "release.failed", r.Operator, r.ID, string(stage)+": "+cause.Error())
 	return r, cause
+}
+
+func (s *Service) recordAudit(ctx context.Context, action, actor, resource, detail string) {
+	if s.audit == nil {
+		return
+	}
+	entry := data.AuditEntry{Action: action, Actor: actor, Resource: resource, RequestID: middleware.GetRequestID(ctx), Detail: detail, CreatedAt: time.Now().UTC()}
+	if err := s.audit.Write(entry); err != nil {
+		slog.Default().Warn("发布流水线审计写入失败", "action", action, "resource", resource, "err", err)
+	}
 }
 func (s *Service) modelAction(ctx context.Context, versionID, action string, token bool) error {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, s.modelRegistry+"/api/v1/versions/"+versionID+"/"+action, nil)

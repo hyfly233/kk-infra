@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"kk-infra/services/pipeline/internal/data"
 )
@@ -25,7 +26,7 @@ func TestReleaseRequiresApprovalAndPersistsStages(t *testing.T) {
 	defer registry.Close()
 	probe := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true}`))
+		_, _ = w.Write([]byte(`{"ok":true,"usage":{"completion_tokens":12}}`))
 	}))
 	defer probe.Close()
 
@@ -94,5 +95,34 @@ func TestFailedReleaseIsAudited(t *testing.T) {
 	}
 	if len(audit.Entries) != 2 || audit.Entries[1].Action != "release.failed" || audit.Entries[1].Resource != record.ID {
 		t.Fatalf("failed release audit mismatch: %+v", audit.Entries)
+	}
+}
+
+func TestBenchmarkThresholdFailureBlocksApprovalAndPersistsMetrics(t *testing.T) {
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+	defer registry.Close()
+	probe := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"usage":{"completion_tokens":1}}`))
+	}))
+	defer probe.Close()
+	store := data.NewMemoryStore()
+	svc := New(store, registry.URL, probe.URL, "secret")
+	svc.SetBenchmarkPolicy(BenchmarkPolicy{MaxTTFTMs: 1, MinTokensPerSec: 0.1, MaxErrorRate: 0})
+	record, err := svc.Start(context.Background(), "v1", "developer")
+	if err == nil || record.Status != "FAILED" || record.Benchmark == nil || record.Benchmark.TTFTMs <= 1 {
+		t.Fatalf("benchmark threshold did not block release: %+v err=%v", record, err)
+	}
+	stored, getErr := store.Get(record.ID)
+	if getErr != nil || stored.Benchmark == nil || stored.Status != "FAILED" {
+		t.Fatalf("failed benchmark metrics not persisted: %+v err=%v", stored, getErr)
+	}
+	if _, approveErr := svc.Approve(context.Background(), record.ID, "admin", "", true); approveErr == nil {
+		t.Fatal("benchmark failure must not be approvable")
 	}
 }

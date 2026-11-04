@@ -22,8 +22,15 @@ func main() {
 	registry := flag.String("model-registry", "http://127.0.0.1:8081", "modelregistry URL")
 	probe := flag.String("probe-url", "http://127.0.0.1:8085", "临时探针/基准服务 URL")
 	token := flag.String("pipeline-token", "", "modelregistry 发布令牌")
+	maxTTFT := flag.Float64("benchmark-max-ttft-ms", 5000, "发布门禁允许的最大 TTFT（毫秒，0 表示禁用）")
+	minThroughput := flag.Float64("benchmark-min-tokens-per-sec", 0.1, "发布门禁要求的最小输出吞吐（0 表示禁用）")
+	maxErrorRate := flag.Float64("benchmark-max-error-rate", 0, "发布门禁允许的最大错误率百分比")
 	flag.Parse()
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	if *maxTTFT < 0 || *minThroughput < 0 || *maxErrorRate < 0 || *maxErrorRate > 100 {
+		logger.Error("benchmark 门限无效", "maxTTFTMs", *maxTTFT, "minTokensPerSec", *minThroughput, "maxErrorRate", *maxErrorRate)
+		os.Exit(2)
+	}
 	var releaseStore data.Store = data.NewMemoryStore()
 	var auditStore data.AuditStore = &data.MemoryAuditStore{}
 	if *storageMode == "postgres" {
@@ -40,6 +47,7 @@ func main() {
 		auditStore = data.NewPostgresAuditStore(db)
 	}
 	svc := service.New(releaseStore, *registry, *probe, *token, auditStore)
+	svc.SetBenchmarkPolicy(service.BenchmarkPolicy{MaxTTFTMs: *maxTTFT, MinTokensPerSec: *minThroughput, MaxErrorRate: *maxErrorRate})
 	httpSrv := &http.Server{Addr: *addr, Handler: server.New(svc, logger).Handler(), ReadHeaderTimeout: 5 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

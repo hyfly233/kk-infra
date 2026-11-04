@@ -21,6 +21,13 @@ type Service struct {
 	modelRegistry, probeURL, pipelineToken string
 	http                                   *http.Client
 	audit                                  data.AuditStore
+	benchmarkPolicy                        BenchmarkPolicy
+}
+
+type BenchmarkPolicy struct {
+	MaxTTFTMs       float64
+	MinTokensPerSec float64
+	MaxErrorRate    float64
 }
 
 func New(store data.Store, modelRegistry, probeURL, token string, audits ...data.AuditStore) *Service {
@@ -28,8 +35,10 @@ func New(store data.Store, modelRegistry, probeURL, token string, audits ...data
 	if len(audits) > 0 {
 		audit = audits[0]
 	}
-	return &Service{store: store, modelRegistry: modelRegistry, probeURL: probeURL, pipelineToken: token, http: &http.Client{Timeout: 30 * time.Second}, audit: audit}
+	return &Service{store: store, modelRegistry: modelRegistry, probeURL: probeURL, pipelineToken: token, http: &http.Client{Timeout: 30 * time.Second}, audit: audit, benchmarkPolicy: BenchmarkPolicy{MaxTTFTMs: 5000, MinTokensPerSec: 0.1, MaxErrorRate: 0}}
 }
+
+func (s *Service) SetBenchmarkPolicy(policy BenchmarkPolicy) { s.benchmarkPolicy = policy }
 
 func id() string { b := make([]byte, 10); _, _ = rand.Read(b); return "rel-" + hex.EncodeToString(b) }
 
@@ -62,10 +71,10 @@ func (s *Service) Start(ctx context.Context, versionID, operator string) (*pipel
 	resp.Body.Close()
 	r.StageResults = append(r.StageResults, pipeline.RunResult{Stage: pipeline.StageProbe, Status: "passed", Message: "临时探针健康检查通过", DurationMs: time.Since(started).Milliseconds()})
 	bench, err := s.benchmark(ctx, versionID)
+	r.Benchmark = bench
 	if err != nil {
 		return s.fail(ctx, r, pipeline.StageBenchmark, err)
 	}
-	r.Benchmark = bench
 	r.StageResults = append(r.StageResults, pipeline.RunResult{Stage: pipeline.StageBenchmark, Status: "passed", Message: "基准测试通过"}, pipeline.RunResult{Stage: pipeline.StageApproval, Status: "pending", Message: "等待人工审批"})
 	r.Status = "PENDING_APPROVAL"
 	r.UpdatedAt = time.Now().UTC()
@@ -152,12 +161,31 @@ func (s *Service) benchmark(ctx context.Context, versionID string) (*pipeline.Be
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := s.http.Do(req)
 	if err != nil {
-		return nil, err
+		return &pipeline.BenchmarkResult{ModelVersionID: versionID, Requests: 1, ErrorRate: 100}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("benchmark 返回 %s", resp.Status)
+		return &pipeline.BenchmarkResult{ModelVersionID: versionID, Requests: 1, ErrorRate: 100}, fmt.Errorf("benchmark 返回 %s", resp.Status)
+	}
+	var result struct {
+		Usage struct {
+			CompletionTokens int64 `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return &pipeline.BenchmarkResult{ModelVersionID: versionID, Requests: 1, ErrorRate: 100}, fmt.Errorf("benchmark 响应无效: %w", err)
 	}
 	latency := float64(time.Since(started).Milliseconds())
-	return &pipeline.BenchmarkResult{ModelVersionID: versionID, TTFTMs: latency, TokensPerSec: 1000 / max(latency, 1), Requests: 1}, nil
+	bench := &pipeline.BenchmarkResult{ModelVersionID: versionID, TTFTMs: latency, TokensPerSec: float64(result.Usage.CompletionTokens) * 1000 / max(latency, 1), Requests: 1}
+	policy := s.benchmarkPolicy
+	if policy.MaxTTFTMs > 0 && bench.TTFTMs > policy.MaxTTFTMs {
+		return bench, fmt.Errorf("benchmark TTFT %.0fms 超过门限 %.0fms", bench.TTFTMs, policy.MaxTTFTMs)
+	}
+	if policy.MinTokensPerSec > 0 && bench.TokensPerSec < policy.MinTokensPerSec {
+		return bench, fmt.Errorf("benchmark 吞吐 %.2f tokens/s 低于门限 %.2f", bench.TokensPerSec, policy.MinTokensPerSec)
+	}
+	if bench.ErrorRate > policy.MaxErrorRate {
+		return bench, fmt.Errorf("benchmark 错误率 %.2f%% 超过门限 %.2f%%", bench.ErrorRate, policy.MaxErrorRate)
+	}
+	return bench, nil
 }

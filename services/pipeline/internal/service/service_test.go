@@ -25,8 +25,11 @@ func TestReleaseRequiresApprovalAndPersistsStages(t *testing.T) {
 	}))
 	defer registry.Close()
 	probe := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true,"usage":{"completion_tokens":12}}`))
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		writeBenchmarkSSE(w, 0)
 	}))
 	defer probe.Close()
 
@@ -106,9 +109,7 @@ func TestBenchmarkThresholdFailureBlocksApprovalAndPersistsMetrics(t *testing.T)
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		time.Sleep(20 * time.Millisecond)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"usage":{"completion_tokens":1}}`))
+		writeBenchmarkSSE(w, 20*time.Millisecond)
 	}))
 	defer probe.Close()
 	store := data.NewMemoryStore()
@@ -125,4 +126,30 @@ func TestBenchmarkThresholdFailureBlocksApprovalAndPersistsMetrics(t *testing.T)
 	if _, approveErr := svc.Approve(context.Background(), record.ID, "admin", "", true); approveErr == nil {
 		t.Fatal("benchmark failure must not be approvable")
 	}
+}
+
+func TestBenchmarkEmptyStreamBlocksRelease(t *testing.T) {
+	registry := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) }))
+	defer registry.Close()
+	probe := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer probe.Close()
+	record, err := New(data.NewMemoryStore(), registry.URL, probe.URL, "secret").Start(context.Background(), "v1", "developer")
+	if err == nil || record.Status != "FAILED" || !strings.Contains(err.Error(), "未返回有效 Token") {
+		t.Fatalf("empty stream must block release: %+v err=%v", record, err)
+	}
+}
+
+func writeBenchmarkSSE(w http.ResponseWriter, firstTokenDelay time.Duration) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	time.Sleep(firstTokenDelay)
+	_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"pong\"}}]}\n\n"))
+	_, _ = w.Write([]byte("data: {\"choices\":[],\"usage\":{\"completion_tokens\":1}}\n\n"))
+	_, _ = w.Write([]byte("data: [DONE]\n\n"))
 }

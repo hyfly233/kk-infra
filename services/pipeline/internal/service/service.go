@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -9,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"kk-infra/lib/middleware"
@@ -155,7 +157,7 @@ func (s *Service) modelAction(ctx context.Context, versionID, action string, tok
 	return nil
 }
 func (s *Service) benchmark(ctx context.Context, versionID string) (*pipeline.BenchmarkResult, error) {
-	body, _ := json.Marshal(map[string]any{"model": "pipeline-probe", "messages": []map[string]string{{"role": "user", "content": "ping"}}})
+	body, _ := json.Marshal(map[string]any{"model": "pipeline-probe", "messages": []map[string]string{{"role": "user", "content": "ping"}}, "stream": true, "stream_options": map[string]bool{"include_usage": true}})
 	started := time.Now()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, s.probeURL+"/v1/chat/completions", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -167,16 +169,51 @@ func (s *Service) benchmark(ctx context.Context, versionID string) (*pipeline.Be
 	if resp.StatusCode/100 != 2 {
 		return &pipeline.BenchmarkResult{ModelVersionID: versionID, Requests: 1, ErrorRate: 100}, fmt.Errorf("benchmark 返回 %s", resp.Status)
 	}
-	var result struct {
+	var event struct {
+		Choices []struct {
+			Delta struct {
+				Content string `json:"content"`
+			} `json:"delta"`
+		} `json:"choices"`
 		Usage struct {
 			CompletionTokens int64 `json:"completion_tokens"`
 		} `json:"usage"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return &pipeline.BenchmarkResult{ModelVersionID: versionID, Requests: 1, ErrorRate: 100}, fmt.Errorf("benchmark 响应无效: %w", err)
+	var firstToken time.Time
+	var completionTokens int64
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 4096), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "[DONE]" {
+			break
+		}
+		if err := json.Unmarshal([]byte(payload), &event); err != nil {
+			return &pipeline.BenchmarkResult{ModelVersionID: versionID, Requests: 1, ErrorRate: 100}, fmt.Errorf("benchmark SSE 响应无效: %w", err)
+		}
+		if event.Usage.CompletionTokens > 0 {
+			completionTokens = event.Usage.CompletionTokens
+		}
+		if firstToken.IsZero() && len(event.Choices) > 0 && event.Choices[0].Delta.Content != "" {
+			firstToken = time.Now()
+		}
 	}
-	latency := float64(time.Since(started).Milliseconds())
-	bench := &pipeline.BenchmarkResult{ModelVersionID: versionID, TTFTMs: latency, TokensPerSec: float64(result.Usage.CompletionTokens) * 1000 / max(latency, 1), Requests: 1}
+	if err := scanner.Err(); err != nil {
+		return &pipeline.BenchmarkResult{ModelVersionID: versionID, Requests: 1, ErrorRate: 100}, fmt.Errorf("读取 benchmark SSE 失败: %w", err)
+	}
+	if firstToken.IsZero() {
+		return &pipeline.BenchmarkResult{ModelVersionID: versionID, Requests: 1, ErrorRate: 100}, fmt.Errorf("benchmark 未返回有效 Token")
+	}
+	if completionTokens <= 0 {
+		return &pipeline.BenchmarkResult{ModelVersionID: versionID, Requests: 1, ErrorRate: 100}, fmt.Errorf("benchmark 未返回 completion_tokens")
+	}
+	ttft := float64(firstToken.Sub(started).Milliseconds())
+	totalLatency := float64(time.Since(started).Milliseconds())
+	bench := &pipeline.BenchmarkResult{ModelVersionID: versionID, TTFTMs: ttft, TokensPerSec: float64(completionTokens) * 1000 / max(totalLatency, 1), Requests: 1}
 	policy := s.benchmarkPolicy
 	if policy.MaxTTFTMs > 0 && bench.TTFTMs > policy.MaxTTFTMs {
 		return bench, fmt.Errorf("benchmark TTFT %.0fms 超过门限 %.0fms", bench.TTFTMs, policy.MaxTTFTMs)

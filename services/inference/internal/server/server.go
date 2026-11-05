@@ -21,9 +21,14 @@ type OpenAIModel struct {
 
 // ChatRequest OpenAI Chat 请求
 type ChatRequest struct {
-	Model    string    `json:"model"`
-	Messages []Message `json:"messages"`
-	Stream   bool      `json:"stream"`
+	Model         string         `json:"model"`
+	Messages      []Message      `json:"messages"`
+	Stream        bool           `json:"stream"`
+	StreamOptions *StreamOptions `json:"stream_options,omitempty"`
+}
+
+type StreamOptions struct {
+	IncludeUsage bool `json:"include_usage"`
 }
 
 // Message 消息
@@ -34,12 +39,12 @@ type Message struct {
 
 // ChatResponse 非流式响应
 type ChatResponse struct {
-	ID      string    `json:"id"`
-	Object  string    `json:"object"`
-	Created int64     `json:"created"`
-	Model   string    `json:"model"`
-	Choices []Choice  `json:"choices"`
-	Usage   Usage     `json:"usage"`
+	ID      string   `json:"id"`
+	Object  string   `json:"object"`
+	Created int64    `json:"created"`
+	Model   string   `json:"model"`
+	Choices []Choice `json:"choices"`
+	Usage   Usage    `json:"usage"`
 }
 
 // Choice 选项
@@ -193,6 +198,15 @@ func (s *Server) handleStream(w http.ResponseWriter, req ChatRequest, content st
 		_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
 		time.Sleep(s.extraDelay)
+	}
+	if req.StreamOptions != nil && req.StreamOptions.IncludeUsage {
+		usage := map[string]interface{}{
+			"id": "chatcmpl-mock-stream-1", "object": "chat.completion.chunk", "created": now, "model": req.Model,
+			"choices": []interface{}{}, "usage": Usage{PromptTokens: countTokens(req), CompletionTokens: 12, TotalTokens: countTokens(req) + 12},
+		}
+		data, _ := json.Marshal(usage)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
 	}
 	_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
 	flusher.Flush()

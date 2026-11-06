@@ -36,11 +36,16 @@ func renderProgressiveManifests(spec *DeploymentSpec, base *deployManifests, pro
 		"apiVersion": "argoproj.io/v1alpha1", "kind": "AnalysisTemplate",
 		"metadata": map[string]any{"name": analysisName, "namespace": namespace, "labels": labels},
 		"spec": map[string]any{
-			"args": []map[string]any{{"name": "deployment-id"}, {"name": "tenant-id"}},
+			"args": []map[string]any{
+				{"name": "deployment-id"}, {"name": "tenant-id"},
+				{"name": "max-error-rate", "value": "0.05"},
+				{"name": "max-ttft-ms", "value": "2000"},
+				{"name": "min-throughput", "value": "1"},
+			},
 			"metrics": []map[string]any{
-				analysisMetric("error-rate", `result[0] < 0.05`, prometheusURL, `sum(rate(carrot_inference_errors_total{deployment_id="{{args.deployment-id}}",tenant_id="{{args.tenant-id}}"}[2m])) / clamp_min(sum(rate(carrot_inference_requests_total{deployment_id="{{args.deployment-id}}",tenant_id="{{args.tenant-id}}"}[2m])), 1)`),
-				analysisMetric("ttft", `result[0] < 2000`, prometheusURL, `max(carrot_inference_ttft_ms{deployment_id="{{args.deployment-id}}",tenant_id="{{args.tenant-id}}"})`),
-				analysisMetric("throughput", `result[0] > 1`, prometheusURL, `sum(rate(carrot_inference_output_tokens_total{deployment_id="{{args.deployment-id}}",tenant_id="{{args.tenant-id}}"}[2m]))`),
+				analysisMetric("error-rate", `len(result) > 0 && result[0] < {{args.max-error-rate}}`, `len(result) == 0 || result[0] >= {{args.max-error-rate}}`, prometheusURL, `sum(rate(carrot_inference_errors_total{deployment_id="{{args.deployment-id}}",tenant_id="{{args.tenant-id}}"}[2m])) / clamp_min(sum(rate(carrot_inference_requests_total{deployment_id="{{args.deployment-id}}",tenant_id="{{args.tenant-id}}"}[2m])), 0.000001)`),
+				analysisMetric("ttft", `len(result) > 0 && result[0] < {{args.max-ttft-ms}}`, `len(result) == 0 || result[0] >= {{args.max-ttft-ms}}`, prometheusURL, `max(carrot_inference_ttft_ms{deployment_id="{{args.deployment-id}}",tenant_id="{{args.tenant-id}}"})`),
+				analysisMetric("throughput", `len(result) > 0 && result[0] > {{args.min-throughput}}`, `len(result) == 0 || result[0] <= {{args.min-throughput}}`, prometheusURL, `sum(rate(carrot_inference_output_tokens_total{deployment_id="{{args.deployment-id}}",tenant_id="{{args.tenant-id}}"}[2m]))`),
 			},
 		},
 	}
@@ -60,13 +65,13 @@ func renderProgressiveManifests(spec *DeploymentSpec, base *deployManifests, pro
 			"strategy": map[string]any{"canary": map[string]any{
 				"stableService": stableName, "canaryService": canaryName,
 				"trafficRouting": map[string]any{"istio": map[string]any{"virtualService": map[string]any{"name": virtualName, "routes": []string{routeName}}}},
-				"steps":          []map[string]any{{"setWeight": 10}, {"pause": map[string]any{"duration": "30s"}}, analysisStep, {"setWeight": 25}, analysisStep, {"setWeight": 50}, analysisStep, {"setWeight": 100}},
+				"steps":          []map[string]any{{"setWeight": 10}, {"pause": map[string]any{"duration": "30s"}}, analysisStep, {"setWeight": 25}, analysisStep, {"setWeight": 50}, analysisStep, {"setWeight": 100}, analysisStep},
 			}},
 		},
 	}
 	return &progressiveManifests{Rollout: rollout, StableService: &stable, CanaryService: &canary, VirtualService: virtual, AnalysisTemplate: analysis}, nil
 }
 
-func analysisMetric(name, success, address, query string) map[string]any {
-	return map[string]any{"name": name, "interval": "1m", "count": 3, "failureLimit": 1, "successCondition": success, "provider": map[string]any{"prometheus": map[string]any{"address": address, "query": query}}}
+func analysisMetric(name, success, failure, address, query string) map[string]any {
+	return map[string]any{"name": name, "interval": "1m", "count": 3, "failureLimit": 1, "inconclusiveLimit": 1, "successCondition": success, "failureCondition": failure, "provider": map[string]any{"prometheus": map[string]any{"address": address, "query": query}}}
 }

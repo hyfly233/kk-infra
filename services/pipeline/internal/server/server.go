@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strconv"
 
 	"kk-infra/lib/apitypes"
 	"kk-infra/lib/errcode"
@@ -21,9 +22,23 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("POST /api/v1/releases", s.start)
+	mux.HandleFunc("GET /api/v1/releases", s.list)
 	mux.HandleFunc("GET /api/v1/releases/{id}", s.get)
 	mux.HandleFunc("POST /api/v1/releases/{id}/approval", s.approve)
 	return middleware.WithRequestID(middleware.Recover(s.logger, middleware.AccessLog(s.logger, mux)))
+}
+func (s *Server) list(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 || parsed > 200 {
+			apitypes.WriteResult(w, r, nil, errcode.New(errcode.ErrBadRequest, "limit 必须为 1-200"))
+			return
+		}
+		limit = parsed
+	}
+	records, err := s.service.List(limit, r.URL.Query().Get("modelVersionId"))
+	apitypes.WriteResult(w, r, records, err)
 }
 func (s *Server) start(w http.ResponseWriter, r *http.Request) {
 	var req struct {

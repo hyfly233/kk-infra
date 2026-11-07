@@ -123,6 +123,9 @@ func (s *Service) Approve(ctx context.Context, id, approver, message string, app
 	return r, nil
 }
 func (s *Service) Get(id string) (*pipeline.ReleaseRecord, error) { return s.store.Get(id) }
+func (s *Service) List(limit int, versionID string) ([]*pipeline.ReleaseRecord, error) {
+	return s.store.List(limit, versionID)
+}
 func (s *Service) fail(ctx context.Context, r *pipeline.ReleaseRecord, stage pipeline.Stage, cause error) (*pipeline.ReleaseRecord, error) {
 	r.Status = "FAILED"
 	r.UpdatedAt = time.Now().UTC()

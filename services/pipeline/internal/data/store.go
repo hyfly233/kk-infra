@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"slices"
 	"sync"
 	"time"
 
@@ -15,6 +16,7 @@ var ErrNotFound = errors.New("release record not found")
 type Store interface {
 	Create(*pipeline.ReleaseRecord) error
 	Get(string) (*pipeline.ReleaseRecord, error)
+	List(int, string) ([]*pipeline.ReleaseRecord, error)
 	Update(*pipeline.ReleaseRecord) error
 }
 
@@ -48,6 +50,24 @@ func (s *MemoryStore) Get(id string) (*pipeline.ReleaseRecord, error) {
 		return nil, ErrNotFound
 	}
 	return clone(record), nil
+}
+func (s *MemoryStore) List(limit int, versionID string) ([]*pipeline.ReleaseRecord, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	out := make([]*pipeline.ReleaseRecord, 0, limit)
+	for _, record := range s.records {
+		if versionID == "" || record.ModelVersionID == versionID {
+			out = append(out, clone(record))
+		}
+	}
+	slices.SortFunc(out, func(a, b *pipeline.ReleaseRecord) int { return b.CreatedAt.Compare(a.CreatedAt) })
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }
 func (s *MemoryStore) Update(record *pipeline.ReleaseRecord) error {
 	s.mu.Lock()
@@ -84,6 +104,39 @@ func (s *PostgresStore) Get(id string) (*pipeline.ReleaseRecord, error) {
 		_ = json.Unmarshal(benchmark, &r.Benchmark)
 	}
 	return r, nil
+}
+func (s *PostgresStore) List(limit int, versionID string) ([]*pipeline.ReleaseRecord, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	query := `SELECT id,model_version_id,operator,status,stage_results,COALESCE(benchmark,'null'),approved_by,approval_message,created_at,updated_at,released_at FROM release_records`
+	args := []any{}
+	if versionID != "" {
+		query += ` WHERE model_version_id=$1 ORDER BY created_at DESC LIMIT $2`
+		args = append(args, versionID, limit)
+	} else {
+		query += ` ORDER BY created_at DESC LIMIT $1`
+		args = append(args, limit)
+	}
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]*pipeline.ReleaseRecord, 0)
+	for rows.Next() {
+		r := &pipeline.ReleaseRecord{}
+		var stages, benchmark []byte
+		if err := rows.Scan(&r.ID, &r.ModelVersionID, &r.Operator, &r.Status, &stages, &benchmark, &r.ApprovedBy, &r.ApprovalMessage, &r.CreatedAt, &r.UpdatedAt, &r.ReleasedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal(stages, &r.StageResults)
+		if string(benchmark) != "null" {
+			_ = json.Unmarshal(benchmark, &r.Benchmark)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 func (s *PostgresStore) Update(r *pipeline.ReleaseRecord) error {
 	stages, _ := json.Marshal(r.StageResults)

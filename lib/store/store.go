@@ -29,6 +29,7 @@ func MigrateAll(db *sql.DB) error {
 		"migrations/010_release_records.sql",
 		"migrations/011_deployment_revisions.sql",
 		"migrations/012_rollout_routes.sql",
+		"migrations/013_release_tenants.sql",
 	})
 }
 

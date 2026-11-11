@@ -44,16 +44,20 @@ func (s *Service) SetBenchmarkPolicy(policy BenchmarkPolicy) { s.benchmarkPolicy
 
 func id() string { b := make([]byte, 10); _, _ = rand.Read(b); return "rel-" + hex.EncodeToString(b) }
 
-func (s *Service) Start(ctx context.Context, versionID, operator string) (*pipeline.ReleaseRecord, error) {
+func (s *Service) Start(ctx context.Context, versionID, operator string, tenantIDs ...string) (*pipeline.ReleaseRecord, error) {
 	if versionID == "" || operator == "" {
 		return nil, fmt.Errorf("modelVersionId 和 operator 必填")
 	}
 	now := time.Now().UTC()
-	r := &pipeline.ReleaseRecord{ID: id(), ModelVersionID: versionID, Operator: operator, Status: "RUNNING", CreatedAt: now, UpdatedAt: now}
+	tenantID := ""
+	if len(tenantIDs) > 0 {
+		tenantID = tenantIDs[0]
+	}
+	r := &pipeline.ReleaseRecord{ID: id(), ModelVersionID: versionID, TenantID: tenantID, Operator: operator, Status: "RUNNING", CreatedAt: now, UpdatedAt: now}
 	if err := s.store.Create(r); err != nil {
 		return nil, err
 	}
-	s.recordAudit(ctx, "release.start", operator, r.ID, "启动模型版本 "+versionID+" 的发布流水线")
+	s.recordAudit(ctx, "release.start", operator, r.TenantID, r.ID, "启动模型版本 "+versionID+" 的发布流水线")
 	if err := s.modelAction(ctx, versionID, "validate", false); err != nil {
 		return s.fail(ctx, r, pipeline.StageArtifactValidate, err)
 	}
@@ -103,7 +107,7 @@ func (s *Service) Approve(ctx context.Context, id, approver, message string, app
 		r.StageResults[idx].Status = "failed"
 		r.StageResults[idx].Message = "人工拒绝: " + message
 		_ = s.store.Update(r)
-		s.recordAudit(ctx, "release.reject", approver, r.ID, "拒绝模型版本 "+r.ModelVersionID+" 的发布: "+message)
+		s.recordAudit(ctx, "release.reject", approver, r.TenantID, r.ID, "拒绝模型版本 "+r.ModelVersionID+" 的发布: "+message)
 		return r, nil
 	}
 	r.StageResults[idx].Status = "passed"
@@ -119,27 +123,27 @@ func (s *Service) Approve(ctx context.Context, id, approver, message string, app
 	if err := s.store.Update(r); err != nil {
 		return nil, err
 	}
-	s.recordAudit(ctx, "release.approve", approver, r.ID, "批准并发布模型版本 "+r.ModelVersionID)
+	s.recordAudit(ctx, "release.approve", approver, r.TenantID, r.ID, "批准并发布模型版本 "+r.ModelVersionID)
 	return r, nil
 }
 func (s *Service) Get(id string) (*pipeline.ReleaseRecord, error) { return s.store.Get(id) }
-func (s *Service) List(limit int, versionID string) ([]*pipeline.ReleaseRecord, error) {
-	return s.store.List(limit, versionID)
+func (s *Service) List(limit int, versionID, tenantID string) ([]*pipeline.ReleaseRecord, error) {
+	return s.store.List(limit, versionID, tenantID)
 }
 func (s *Service) fail(ctx context.Context, r *pipeline.ReleaseRecord, stage pipeline.Stage, cause error) (*pipeline.ReleaseRecord, error) {
 	r.Status = "FAILED"
 	r.UpdatedAt = time.Now().UTC()
 	r.StageResults = append(r.StageResults, pipeline.RunResult{Stage: stage, Status: "failed", Message: cause.Error()})
 	_ = s.store.Update(r)
-	s.recordAudit(ctx, "release.failed", r.Operator, r.ID, string(stage)+": "+cause.Error())
+	s.recordAudit(ctx, "release.failed", r.Operator, r.TenantID, r.ID, string(stage)+": "+cause.Error())
 	return r, cause
 }
 
-func (s *Service) recordAudit(ctx context.Context, action, actor, resource, detail string) {
+func (s *Service) recordAudit(ctx context.Context, action, actor, tenantID, resource, detail string) {
 	if s.audit == nil {
 		return
 	}
-	entry := data.AuditEntry{Action: action, Actor: actor, Resource: resource, RequestID: middleware.GetRequestID(ctx), Detail: detail, CreatedAt: time.Now().UTC()}
+	entry := data.AuditEntry{Action: action, Actor: actor, TenantID: tenantID, Resource: resource, RequestID: middleware.GetRequestID(ctx), Detail: detail, CreatedAt: time.Now().UTC()}
 	if err := s.audit.Write(entry); err != nil {
 		slog.Default().Warn("发布流水线审计写入失败", "action", action, "resource", resource, "err", err)
 	}

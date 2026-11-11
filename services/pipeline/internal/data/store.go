@@ -4,7 +4,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,7 +18,7 @@ var ErrNotFound = errors.New("release record not found")
 type Store interface {
 	Create(*pipeline.ReleaseRecord) error
 	Get(string) (*pipeline.ReleaseRecord, error)
-	List(int, string) ([]*pipeline.ReleaseRecord, error)
+	List(int, string, string) ([]*pipeline.ReleaseRecord, error)
 	Update(*pipeline.ReleaseRecord) error
 }
 
@@ -51,7 +53,7 @@ func (s *MemoryStore) Get(id string) (*pipeline.ReleaseRecord, error) {
 	}
 	return clone(record), nil
 }
-func (s *MemoryStore) List(limit int, versionID string) ([]*pipeline.ReleaseRecord, error) {
+func (s *MemoryStore) List(limit int, versionID, tenantID string) ([]*pipeline.ReleaseRecord, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if limit <= 0 || limit > 200 {
@@ -59,7 +61,7 @@ func (s *MemoryStore) List(limit int, versionID string) ([]*pipeline.ReleaseReco
 	}
 	out := make([]*pipeline.ReleaseRecord, 0, limit)
 	for _, record := range s.records {
-		if versionID == "" || record.ModelVersionID == versionID {
+		if (versionID == "" || record.ModelVersionID == versionID) && (tenantID == "" || record.TenantID == tenantID) {
 			out = append(out, clone(record))
 		}
 	}
@@ -85,14 +87,14 @@ func NewPostgresStore(db *sql.DB) *PostgresStore { return &PostgresStore{db: db}
 func (s *PostgresStore) Create(r *pipeline.ReleaseRecord) error {
 	stages, _ := json.Marshal(r.StageResults)
 	benchmark, _ := json.Marshal(r.Benchmark)
-	_, err := s.db.Exec(`INSERT INTO release_records (id,model_version_id,operator,status,stage_results,benchmark,approved_by,approval_message,created_at,updated_at,released_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, r.ID, r.ModelVersionID, r.Operator, r.Status, stages, nullableJSON(r.Benchmark, benchmark), r.ApprovedBy, r.ApprovalMessage, r.CreatedAt, r.UpdatedAt, r.ReleasedAt)
+	_, err := s.db.Exec(`INSERT INTO release_records (id,model_version_id,tenant_id,operator,status,stage_results,benchmark,approved_by,approval_message,created_at,updated_at,released_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, r.ID, r.ModelVersionID, r.TenantID, r.Operator, r.Status, stages, nullableJSON(r.Benchmark, benchmark), r.ApprovedBy, r.ApprovalMessage, r.CreatedAt, r.UpdatedAt, r.ReleasedAt)
 	return err
 }
 func (s *PostgresStore) Get(id string) (*pipeline.ReleaseRecord, error) {
 	r := &pipeline.ReleaseRecord{}
 	var stages []byte
 	var benchmark []byte
-	err := s.db.QueryRow(`SELECT id,model_version_id,operator,status,stage_results,COALESCE(benchmark,'null'),approved_by,approval_message,created_at,updated_at,released_at FROM release_records WHERE id=$1`, id).Scan(&r.ID, &r.ModelVersionID, &r.Operator, &r.Status, &stages, &benchmark, &r.ApprovedBy, &r.ApprovalMessage, &r.CreatedAt, &r.UpdatedAt, &r.ReleasedAt)
+	err := s.db.QueryRow(`SELECT id,model_version_id,tenant_id,operator,status,stage_results,COALESCE(benchmark,'null'),approved_by,approval_message,created_at,updated_at,released_at FROM release_records WHERE id=$1`, id).Scan(&r.ID, &r.ModelVersionID, &r.TenantID, &r.Operator, &r.Status, &stages, &benchmark, &r.ApprovedBy, &r.ApprovalMessage, &r.CreatedAt, &r.UpdatedAt, &r.ReleasedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -105,19 +107,26 @@ func (s *PostgresStore) Get(id string) (*pipeline.ReleaseRecord, error) {
 	}
 	return r, nil
 }
-func (s *PostgresStore) List(limit int, versionID string) ([]*pipeline.ReleaseRecord, error) {
+func (s *PostgresStore) List(limit int, versionID, tenantID string) ([]*pipeline.ReleaseRecord, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	query := `SELECT id,model_version_id,operator,status,stage_results,COALESCE(benchmark,'null'),approved_by,approval_message,created_at,updated_at,released_at FROM release_records`
+	query := `SELECT id,model_version_id,tenant_id,operator,status,stage_results,COALESCE(benchmark,'null'),approved_by,approval_message,created_at,updated_at,released_at FROM release_records`
 	args := []any{}
+	conditions := make([]string, 0, 2)
 	if versionID != "" {
-		query += ` WHERE model_version_id=$1 ORDER BY created_at DESC LIMIT $2`
-		args = append(args, versionID, limit)
-	} else {
-		query += ` ORDER BY created_at DESC LIMIT $1`
-		args = append(args, limit)
+		args = append(args, versionID)
+		conditions = append(conditions, fmt.Sprintf("model_version_id=$%d", len(args)))
 	}
+	if tenantID != "" {
+		args = append(args, tenantID)
+		conditions = append(conditions, fmt.Sprintf("tenant_id=$%d", len(args)))
+	}
+	if len(conditions) > 0 {
+		query += ` WHERE ` + strings.Join(conditions, " AND ")
+	}
+	args = append(args, limit)
+	query += fmt.Sprintf(` ORDER BY created_at DESC LIMIT $%d`, len(args))
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
@@ -127,7 +136,7 @@ func (s *PostgresStore) List(limit int, versionID string) ([]*pipeline.ReleaseRe
 	for rows.Next() {
 		r := &pipeline.ReleaseRecord{}
 		var stages, benchmark []byte
-		if err := rows.Scan(&r.ID, &r.ModelVersionID, &r.Operator, &r.Status, &stages, &benchmark, &r.ApprovedBy, &r.ApprovalMessage, &r.CreatedAt, &r.UpdatedAt, &r.ReleasedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.ModelVersionID, &r.TenantID, &r.Operator, &r.Status, &stages, &benchmark, &r.ApprovedBy, &r.ApprovalMessage, &r.CreatedAt, &r.UpdatedAt, &r.ReleasedAt); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal(stages, &r.StageResults)
@@ -161,6 +170,7 @@ func nullableJSON(value any, encoded []byte) any {
 type AuditEntry struct {
 	Action    string
 	Actor     string
+	TenantID  string
 	Resource  string
 	RequestID string
 	Detail    string
@@ -188,7 +198,7 @@ type PostgresAuditStore struct{ db *sql.DB }
 func NewPostgresAuditStore(db *sql.DB) *PostgresAuditStore { return &PostgresAuditStore{db: db} }
 
 func (s *PostgresAuditStore) Write(entry AuditEntry) error {
-	_, err := s.db.Exec(`INSERT INTO audit_logs (action, actor, resource, request_id, detail, created_at)
-		VALUES ($1,$2,$3,$4,$5,$6)`, entry.Action, entry.Actor, entry.Resource, entry.RequestID, entry.Detail, entry.CreatedAt)
+	_, err := s.db.Exec(`INSERT INTO audit_logs (action, actor, tenant_id, resource, request_id, detail, created_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7)`, entry.Action, entry.Actor, entry.TenantID, entry.Resource, entry.RequestID, entry.Detail, entry.CreatedAt)
 	return err
 }

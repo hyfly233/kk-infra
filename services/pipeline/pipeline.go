@@ -43,6 +43,7 @@ type BenchmarkResult struct {
 type ReleaseRecord struct {
 	ID              string           `json:"id"`
 	ModelVersionID  string           `json:"modelVersionId"`
+	TenantID        string           `json:"tenantId,omitempty"`
 	Operator        string           `json:"operator"` // 操作者
 	Status          string           `json:"status"`
 	StageResults    []RunResult      `json:"stageResults"`

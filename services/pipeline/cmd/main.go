@@ -22,6 +22,8 @@ func main() {
 	registry := flag.String("model-registry", "http://127.0.0.1:8081", "modelregistry URL")
 	probe := flag.String("probe-url", "http://127.0.0.1:8085", "临时探针/基准服务 URL")
 	token := flag.String("pipeline-token", "", "modelregistry 发布令牌")
+	authSecret := flag.String("auth-secret", os.Getenv("CARROT_AUTH_SECRET"), "JWT 签名密钥（为空时使用开发模式）")
+	authAudience := flag.String("auth-audience", "controlplane", "JWT audience")
 	maxTTFT := flag.Float64("benchmark-max-ttft-ms", 5000, "发布门禁允许的最大 TTFT（毫秒，0 表示禁用）")
 	minThroughput := flag.Float64("benchmark-min-tokens-per-sec", 0.1, "发布门禁要求的最小输出吞吐（0 表示禁用）")
 	maxErrorRate := flag.Float64("benchmark-max-error-rate", 0, "发布门禁允许的最大错误率百分比")
@@ -48,7 +50,11 @@ func main() {
 	}
 	svc := service.New(releaseStore, *registry, *probe, *token, auditStore)
 	svc.SetBenchmarkPolicy(service.BenchmarkPolicy{MaxTTFTMs: *maxTTFT, MinTokensPerSec: *minThroughput, MaxErrorRate: *maxErrorRate})
-	httpSrv := &http.Server{Addr: *addr, Handler: server.New(svc, logger).Handler(), ReadHeaderTimeout: 5 * time.Second}
+	handler := server.New(svc, logger)
+	if *authSecret != "" {
+		handler.SetAuth(*authSecret, *authAudience)
+	}
+	httpSrv := &http.Server{Addr: *addr, Handler: handler.Handler(), ReadHeaderTimeout: 5 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	go func() {

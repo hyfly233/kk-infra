@@ -59,11 +59,11 @@ func TestStateMachine_TransitionError(t *testing.T) {
 // 模型版本可部署性
 func TestModelVersion_Deployable(t *testing.T) {
 	ok := &ModelVersion{
-		Status:     ModelStatusReleased,
-		Runtime:    RuntimeVLLM,
+		Status:      ModelStatusReleased,
+		Runtime:     RuntimeVLLM,
 		ArtifactURI: "s3://bucket/qwen",
-		GPUType:    "A100",
-		GPUCount:   1,
+		GPUType:     "A100",
+		GPUCount:    1,
 	}
 	if !ok.Deployable() {
 		t.Fatal("RELEASED 版本应可部署")
@@ -71,7 +71,7 @@ func TestModelVersion_Deployable(t *testing.T) {
 	cases := []*ModelVersion{
 		{Status: ModelStatusRegistered, Runtime: RuntimeVLLM, ArtifactURI: "s3://x", GPUType: "A100", GPUCount: 1},
 		{Status: ModelStatusValidated, Runtime: RuntimeVLLM, ArtifactURI: "s3://x", GPUType: "A100", GPUCount: 1},
-		{Status: ModelStatusReleased, Runtime: "Triton", ArtifactURI: "s3://x", GPUType: "A100", GPUCount: 1},
+		{Status: ModelStatusReleased, Runtime: "unsupported", ArtifactURI: "s3://x", GPUType: "A100", GPUCount: 1},
 		{Status: ModelStatusReleased, Runtime: RuntimeVLLM, ArtifactURI: "", GPUType: "A100", GPUCount: 1},
 		{Status: ModelStatusReleased, Runtime: RuntimeVLLM, ArtifactURI: "s3://x", GPUType: "", GPUCount: 1},
 		{Status: ModelStatusReleased, Runtime: RuntimeVLLM, ArtifactURI: "s3://x", GPUType: "A100", GPUCount: 0},
@@ -81,11 +81,21 @@ func TestModelVersion_Deployable(t *testing.T) {
 			t.Errorf("case %d 不应可部署: %+v", i, c)
 		}
 	}
+	for _, runtime := range []string{RuntimeVLLM, RuntimeTriton, RuntimeTensorRTLLM} {
+		candidate := *ok
+		candidate.Runtime = runtime
+		if !candidate.Deployable() {
+			t.Errorf("runtime %s 应可部署", runtime)
+		}
+	}
 }
 
 // 版本状态机：REGISTERED → VALIDATED → RELEASED
 func TestVersionStateMachine(t *testing.T) {
-	cases := []struct{ from, to string; ok bool }{
+	cases := []struct {
+		from, to string
+		ok       bool
+	}{
 		{ModelStatusRegistered, ModelStatusValidating, true},
 		{ModelStatusRegistered, ModelStatusValidated, true},
 		{ModelStatusValidated, ModelStatusReleased, true},

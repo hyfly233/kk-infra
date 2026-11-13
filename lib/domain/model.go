@@ -4,10 +4,16 @@ package domain
 
 import "time"
 
-// 模型运行时类型（MVP 仅支持 vLLM）
+// 模型运行时类型。
 const (
-	RuntimeVLLM = "vLLM"
+	RuntimeVLLM        = "vLLM"
+	RuntimeTriton      = "Triton"
+	RuntimeTensorRTLLM = "TensorRT-LLM"
 )
+
+func IsSupportedRuntime(runtime string) bool {
+	return runtime == RuntimeVLLM || runtime == RuntimeTriton || runtime == RuntimeTensorRTLLM
+}
 
 // 模型版本状态
 const (
@@ -69,7 +75,7 @@ type ModelVersion struct {
 func (v *ModelVersion) Deployable() bool {
 	return v != nil &&
 		v.Status == ModelStatusReleased &&
-		v.Runtime == RuntimeVLLM &&
+		IsSupportedRuntime(v.Runtime) &&
 		v.ArtifactURI != "" &&
 		v.GPUType != "" &&
 		v.GPUCount > 0

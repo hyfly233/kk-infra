@@ -221,6 +221,7 @@ func (uc *DeploymentUseCase) submit(ctx context.Context, d *domain.ModelDeployme
 		ModelPath:      deploymentModelPath(d),
 		ArtifactURI:    artifactURI,
 		ArtifactDigest: artifactDigest,
+		Runtime:        d.Runtime,
 	}
 	res, err := uc.kube.CreateDeployment(ctx, spec)
 	if err != nil {
@@ -510,6 +511,7 @@ func (uc *DeploymentUseCase) UpgradeDeployment(ctx context.Context, id, newVersi
 		ModelPath:      deploymentModelPath(updated),
 		ArtifactURI:    artifactURI,
 		ArtifactDigest: artifactDigest,
+		Runtime:        version.Runtime,
 	}
 	res, err := uc.kube.UpdateDeployment(ctx, spec)
 	if err != nil {

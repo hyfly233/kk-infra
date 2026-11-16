@@ -218,6 +218,7 @@ type CreateDeploymentSpec struct {
 	ModelPath      string            `json:"modelPath"`
 	ArtifactURI    string            `json:"artifactUri,omitempty"`
 	ArtifactDigest string            `json:"artifactDigest,omitempty"`
+	Runtime        string            `json:"runtime,omitempty"`
 }
 
 // K8sDeploymentStatus 同步的部署状态（与 k8sadapter 类型一致）

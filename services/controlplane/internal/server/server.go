@@ -61,6 +61,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/bootstrap", s.handleBootstrap)
 	mux.HandleFunc("POST /api/v1/auth/refresh", s.handleRefresh)
 	mux.HandleFunc("POST /api/v1/auth/logout", s.handleLogout)
+	mux.HandleFunc("POST /api/v1/auth/introspect", s.handleIntrospect)
 	mux.HandleFunc("POST /api/v1/users", s.handleCreateUser)
 	mux.HandleFunc("GET /api/v1/tenants/{tenantId}/members", s.handleListMembers)
 	mux.HandleFunc("PUT /api/v1/tenants/{tenantId}/members/{userId}", s.handleSetMember)
@@ -100,6 +101,29 @@ func (s *Server) Handler() http.Handler {
 			middleware.AccessLog(s.logger, base),
 		),
 	)
+}
+
+func (s *Server) handleIntrospect(w http.ResponseWriter, r *http.Request) {
+	token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if token == "" {
+		var req struct {
+			Token string `json:"token"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		token = req.Token
+	}
+	response := map[string]any{"active": false}
+	if s.identity != nil && token != "" {
+		if claims, err := s.identity.Authenticate(token); err == nil {
+			expiresAt := int64(0)
+			if claims.ExpiresAt != nil {
+				expiresAt = claims.ExpiresAt.Unix()
+			}
+			response = map[string]any{"active": true, "sub": claims.Subject, "tenantId": claims.TenantID, "role": claims.Role, "exp": expiresAt}
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(response)
 }
 
 func (s *Server) billingRows(w http.ResponseWriter, r *http.Request) ([]clients.DailyUsage, bool) {

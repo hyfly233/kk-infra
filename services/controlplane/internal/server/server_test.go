@@ -11,10 +11,12 @@ import (
 	"time"
 
 	"kk-infra/lib/apitypes"
+	platformauth "kk-infra/lib/auth"
 	"kk-infra/lib/domain"
 	"kk-infra/services/controlplane/internal/biz"
 	"kk-infra/services/controlplane/internal/clients"
 	"kk-infra/services/controlplane/internal/data"
+	"kk-infra/services/controlplane/internal/identity"
 )
 
 // mockModelClient 模拟 modelregistry
@@ -357,5 +359,34 @@ func TestDeploymentNotFound(t *testing.T) {
 	_, code := doJSON(t, h, http.MethodGet, "/api/v1/deployments/nonexist", nil)
 	if code != http.StatusNotFound {
 		t.Fatalf("不存在部署应返回 404: %d", code)
+	}
+}
+
+func TestJWTIntrospectionReturnsTenantWorkspaceIdentity(t *testing.T) {
+	const secret = "jupyterhub-introspection-secret"
+	srv := NewServer(nil, nil, nil, nil, nil, slog.Default())
+	srv.SetIdentityService(identity.NewService(secret))
+	token, err := platformauth.IssueAccessToken(secret, "user-1", "tenant-a", platformauth.RoleDeveloper, "controlplane", time.Now(), time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/introspect", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	res := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(res, req)
+	var body map[string]any
+	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["active"] != true || body["sub"] != "user-1" || body["tenantId"] != "tenant-a" || body["role"] != string(platformauth.RoleDeveloper) {
+		t.Fatalf("introspection mismatch: %+v", body)
+	}
+
+	bad := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(bad, httptest.NewRequest(http.MethodPost, "/api/v1/auth/introspect", bytes.NewBufferString(`{"token":"invalid"}`)))
+	body = nil
+	_ = json.NewDecoder(bad.Body).Decode(&body)
+	if body["active"] != false {
+		t.Fatalf("invalid token must be inactive: %+v", body)
 	}
 }

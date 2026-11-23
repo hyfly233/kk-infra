@@ -27,6 +27,7 @@ type DeploymentSpec struct {
 	ModelPath      string            `json:"modelPath"` // 模型权重挂载路径
 	ArtifactURI    string            `json:"artifactUri,omitempty"`
 	ArtifactDigest string            `json:"artifactDigest,omitempty"`
+	Runtime        string            `json:"runtime,omitempty"`
 }
 
 // DeploymentResult 创建/查询结果

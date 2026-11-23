@@ -25,6 +25,9 @@ func (c *RealKubeClient) ProvisionTenant(ctx context.Context, tenantID string) e
 	if err := c.ensure(ctx, "/api/v1/namespaces/"+ns+"/serviceaccounts/tenant-runtime", "/api/v1/namespaces/"+ns+"/serviceaccounts", map[string]interface{}{"apiVersion": "v1", "kind": "ServiceAccount", "metadata": map[string]interface{}{"name": "tenant-runtime", "namespace": ns}, "automountServiceAccountToken": false}); err != nil {
 		return err
 	}
+	if err := c.ensure(ctx, "/api/v1/namespaces/"+ns+"/serviceaccounts/tenant-notebook", "/api/v1/namespaces/"+ns+"/serviceaccounts", map[string]interface{}{"apiVersion": "v1", "kind": "ServiceAccount", "metadata": map[string]interface{}{"name": "tenant-notebook", "namespace": ns, "labels": map[string]string{"carrot.ai/tenant-id": tenantID}}, "automountServiceAccountToken": false}); err != nil {
+		return err
+	}
 	if err := c.ensure(ctx, "/apis/rbac.authorization.k8s.io/v1/namespaces/"+ns+"/roles/tenant-runtime", "/apis/rbac.authorization.k8s.io/v1/namespaces/"+ns+"/roles", map[string]interface{}{"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role", "metadata": map[string]interface{}{"name": "tenant-runtime", "namespace": ns}, "rules": []map[string]interface{}{{"apiGroups": []string{"apps"}, "resources": []string{"deployments"}, "verbs": []string{"get", "list", "watch"}}, {"apiGroups": []string{""}, "resources": []string{"pods", "services"}, "verbs": []string{"get", "list", "watch"}}}}); err != nil {
 		return err
 	}
@@ -32,6 +35,16 @@ func (c *RealKubeClient) ProvisionTenant(ctx context.Context, tenantID string) e
 		return err
 	}
 	if err := c.ensure(ctx, "/api/v1/namespaces/"+ns+"/resourcequotas/tenant-default", "/api/v1/namespaces/"+ns+"/resourcequotas", map[string]interface{}{"apiVersion": "v1", "kind": "ResourceQuota", "metadata": map[string]interface{}{"name": "tenant-default", "namespace": ns}, "spec": map[string]interface{}{"hard": map[string]string{"pods": "100", "requests.cpu": "100", "requests.memory": "256Gi"}}}); err != nil {
+		return err
+	}
+	if err := c.ensure(ctx, "/apis/networking.k8s.io/v1/namespaces/"+ns+"/networkpolicies/notebook-access", "/apis/networking.k8s.io/v1/namespaces/"+ns+"/networkpolicies", map[string]interface{}{
+		"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": map[string]interface{}{"name": "notebook-access", "namespace": ns},
+		"spec": map[string]interface{}{
+			"podSelector": map[string]interface{}{"matchLabels": map[string]string{"carrot.ai/workload": "notebook"}}, "policyTypes": []string{"Ingress", "Egress"},
+			"ingress": []map[string]interface{}{{"from": []map[string]interface{}{{"namespaceSelector": map[string]interface{}{"matchLabels": map[string]string{"kubernetes.io/metadata.name": "jupyterhub"}}}}}},
+			"egress":  []map[string]interface{}{{"to": []map[string]interface{}{{"namespaceSelector": map[string]interface{}{"matchLabels": map[string]string{"kubernetes.io/metadata.name": "kube-system"}}}}, "ports": []map[string]interface{}{{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}}}},
+		},
+	}); err != nil {
 		return err
 	}
 	return c.ensure(ctx, "/apis/networking.k8s.io/v1/namespaces/"+ns+"/networkpolicies/default-deny", "/apis/networking.k8s.io/v1/namespaces/"+ns+"/networkpolicies", map[string]interface{}{"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": map[string]interface{}{"name": "default-deny", "namespace": ns}, "spec": map[string]interface{}{"podSelector": map[string]interface{}{}, "policyTypes": []string{"Ingress", "Egress"}}})
@@ -182,20 +195,20 @@ func (c *RealKubeClient) CreateDeployment(ctx context.Context, spec *DeploymentS
 	if image == "" {
 		image = c.deployImage
 	}
-	if image == "" {
-		image = "vllm/vllm-openai:latest"
-	}
 
 	// 复用 renderer 生成 manifest
 	// 虚拟 GPU 池模式（无真实 GPU 节点）不声明 nvidia.com/gpu，避免调度失败
 	gpuEnabled := len(c.virtualGPUs) == 0
-	res, err := renderDeploymentManifests(spec, ns, image, gpuEnabled, c.artifactConfig())
+	res, err := renderDeploymentManifests(spec, ns, image, gpuEnabled, c.artifactConfig(), c.volcanoConfig())
 	if err != nil {
 		return nil, err
 	}
 
 	// 幂等：已存在则直接返回状态
 	if _, err := c.GetDeployment(ctx, spec.Name, ns); err == nil {
+		if err := c.ensureVolcanoResources(ctx, spec, ns, res.PodGroup); err != nil {
+			return nil, err
+		}
 		if err := c.reconcileScaledObject(ctx, spec, ns); err != nil {
 			return nil, err
 		}
@@ -205,6 +218,9 @@ func (c *RealKubeClient) CreateDeployment(ctx context.Context, spec *DeploymentS
 		if err := c.ensure(ctx, "/api/v1/namespaces/"+ns+"/secrets/"+res.Secret.Metadata.Name, "/api/v1/namespaces/"+ns+"/secrets", res.Secret); err != nil {
 			return nil, fmt.Errorf("创建 artifact Secret 失败: %w", err)
 		}
+	}
+	if err := c.ensureVolcanoResources(ctx, spec, ns, res.PodGroup); err != nil {
+		return nil, err
 	}
 	if c.progressiveEnabled {
 		progressive, err := renderProgressiveManifests(spec, res, c.prometheusURL)
@@ -246,10 +262,7 @@ func (c *RealKubeClient) UpdateDeployment(ctx context.Context, spec *DeploymentS
 	if image == "" {
 		image = c.deployImage
 	}
-	if image == "" {
-		image = "vllm/vllm-openai:latest"
-	}
-	res, err := renderDeploymentManifests(spec, ns, image, len(c.virtualGPUs) == 0, c.artifactConfig())
+	res, err := renderDeploymentManifests(spec, ns, image, len(c.virtualGPUs) == 0, c.artifactConfig(), c.volcanoConfig())
 	if err != nil {
 		return nil, err
 	}
@@ -257,6 +270,9 @@ func (c *RealKubeClient) UpdateDeployment(ctx context.Context, spec *DeploymentS
 		if err := c.ensure(ctx, "/api/v1/namespaces/"+ns+"/secrets/"+res.Secret.Metadata.Name, "/api/v1/namespaces/"+ns+"/secrets", res.Secret); err != nil {
 			return nil, fmt.Errorf("更新 artifact Secret 失败: %w", err)
 		}
+	}
+	if err := c.ensureVolcanoResources(ctx, spec, ns, res.PodGroup); err != nil {
+		return nil, err
 	}
 	if c.progressiveEnabled {
 		progressive, err := renderProgressiveManifests(spec, res, c.prometheusURL)
@@ -482,6 +498,32 @@ func (c *RealKubeClient) DeleteDeployment(ctx context.Context, name, namespace s
 	if c.kedaEnabled {
 		_ = c.do(ctx, "DELETE", "/apis/keda.sh/v1alpha1/namespaces/"+ns+"/scaledobjects/"+name, nil, nil)
 	}
+	if c.volcanoEnabled {
+		_ = c.do(ctx, "DELETE", "/apis/scheduling.volcano.sh/v1beta1/namespaces/"+ns+"/podgroups/"+name, nil, nil)
+	}
+	return nil
+}
+
+func (c *RealKubeClient) ensureVolcanoResources(ctx context.Context, spec *DeploymentSpec, namespace string, podGroup map[string]any) error {
+	if !c.volcanoEnabled {
+		return nil
+	}
+	if podGroup == nil {
+		return fmt.Errorf("Volcano 已启用但 PodGroup 未渲染")
+	}
+	tenantID := spec.Labels["carrot.ai/tenant-id"]
+	queueName := volcanoQueueName(c.volcanoQueuePrefix, tenantID)
+	queue := map[string]any{
+		"apiVersion": "scheduling.volcano.sh/v1beta1", "kind": "Queue",
+		"metadata": map[string]any{"name": queueName, "labels": map[string]string{"carrot.ai/tenant-id": tenantID, "carrot.ai/managed-by": "carrot"}},
+		"spec":     map[string]any{"weight": 1, "reclaimable": true},
+	}
+	if err := c.ensure(ctx, "/apis/scheduling.volcano.sh/v1beta1/queues/"+queueName, "/apis/scheduling.volcano.sh/v1beta1/queues", queue); err != nil {
+		return fmt.Errorf("创建 Volcano Queue 失败: %w", err)
+	}
+	if err := c.ensure(ctx, "/apis/scheduling.volcano.sh/v1beta1/namespaces/"+namespace+"/podgroups/"+spec.Name, "/apis/scheduling.volcano.sh/v1beta1/namespaces/"+namespace+"/podgroups", podGroup); err != nil {
+		return fmt.Errorf("创建 Volcano PodGroup 失败: %w", err)
+	}
 	return nil
 }
 
@@ -645,11 +687,20 @@ type artifactStorageConfig struct {
 	Secure                         bool
 }
 
+type volcanoConfig struct {
+	Enabled     bool
+	QueuePrefix string
+}
+
 func (c *RealKubeClient) artifactConfig() artifactStorageConfig {
 	return artifactStorageConfig{c.artifactEndpoint, c.artifactAccessKey, c.artifactSecretKey, c.artifactSecure}
 }
 
-func renderDeploymentManifests(spec *DeploymentSpec, ns, image string, gpuEnabled bool, storage artifactStorageConfig) (*deployManifests, error) {
+func (c *RealKubeClient) volcanoConfig() volcanoConfig {
+	return volcanoConfig{Enabled: c.volcanoEnabled, QueuePrefix: c.volcanoQueuePrefix}
+}
+
+func renderDeploymentManifests(spec *DeploymentSpec, ns, image string, gpuEnabled bool, storage artifactStorageConfig, volcanoOptions ...volcanoConfig) (*deployManifests, error) {
 	if spec.Name == "" || spec.Resource.GPUCount <= 0 {
 		return nil, fmt.Errorf("渲染参数不完整")
 	}
@@ -658,16 +709,25 @@ func renderDeploymentManifests(spec *DeploymentSpec, ns, image string, gpuEnable
 		labels[k] = v
 	}
 	labels["app"] = spec.Name
+	modelPath := spec.ModelPath
+	if spec.ArtifactURI != "" {
+		modelPath = "/models/model"
+	}
+	driver, err := runtimeDriver(spec.Runtime)
+	if err != nil {
+		return nil, err
+	}
+	runtimeContainer := driver.Build(modelPath, spec.Args)
+	if image != "" {
+		runtimeContainer.Image = image
+	}
+	labels["carrot.ai/runtime"] = driver.Runtime()
 	if spec.ArtifactURI != "" && (!strings.HasPrefix(spec.ArtifactURI, "s3://") || !strings.HasPrefix(spec.ArtifactDigest, "sha256:")) {
 		return nil, fmt.Errorf("artifact 下载要求 s3 URI 和 sha256 digest")
 	}
 	if spec.ArtifactURI != "" && (storage.Endpoint == "" || storage.AccessKey == "" || storage.SecretKey == "") {
 		return nil, fmt.Errorf("artifact 下载未配置 S3 endpoint/credentials")
 	}
-
-	// 启动参数：--model + 用户参数（mock 镜像忽略 --model）
-	args := []string{"--model", spec.ModelPath}
-	args = append(args, spec.Args...)
 
 	resLimits := map[string]string{"memory": fmt.Sprintf("%dMi", spec.Resource.MemoryMB)}
 	resRequests := map[string]string{"memory": fmt.Sprintf("%dMi", spec.Resource.MemoryMB)}
@@ -679,26 +739,27 @@ func renderDeploymentManifests(spec *DeploymentSpec, ns, image string, gpuEnable
 	dep := &k8s.Deployment{
 		APIVersion: "apps/v1",
 		Kind:       "Deployment",
-		Metadata:   k8s.ObjectMeta{Name: spec.Name, Namespace: ns, Labels: labels},
+		Metadata:   k8s.ObjectMeta{Name: spec.Name, Namespace: ns, Labels: labels, Annotations: map[string]string{"carrot.ai/metrics-path": runtimeContainer.MetricsPath}},
 		Spec: k8s.DeploymentSpec{
 			Replicas: spec.Replicas,
 			Selector: &k8s.LabelSelector{MatchLabels: map[string]string{"app": spec.Name}},
 			Template: k8s.PodTemplateSpec{
-				Metadata: k8s.ObjectMeta{Labels: labels},
+				Metadata: k8s.ObjectMeta{Labels: labels, Annotations: map[string]string{"prometheus.io/scrape": "true", "prometheus.io/path": runtimeContainer.MetricsPath, "prometheus.io/port": fmt.Sprintf("%d", runtimeContainer.Port)}},
 				Spec: k8s.PodSpec{
 					RestartPolicy: "Always",
 					Containers: []k8s.Container{
 						{
-							Name:  "inference",
-							Image: image,
-							Args:  args,
-							Ports: []k8s.ContainerPort{{Name: "http", ContainerPort: 8000}},
+							Name:    runtimeContainer.Name,
+							Image:   runtimeContainer.Image,
+							Command: runtimeContainer.Command,
+							Args:    runtimeContainer.Args,
+							Ports:   []k8s.ContainerPort{{Name: "http", ContainerPort: runtimeContainer.Port}},
 							Resources: k8s.ResourceRequirements{
 								Limits:   resLimits,
 								Requests: resRequests,
 							},
 							ReadinessProbe: &k8s.Probe{
-								HTTPGet:             &k8s.HTTPGetAction{Path: "/health", Port: 8000},
+								HTTPGet:             &k8s.HTTPGetAction{Path: runtimeContainer.HealthPath, Port: runtimeContainer.Port},
 								InitialDelaySeconds: 5,
 								PeriodSeconds:       5,
 							},
@@ -707,6 +768,20 @@ func renderDeploymentManifests(spec *DeploymentSpec, ns, image string, gpuEnable
 				},
 			},
 		},
+	}
+	var podGroup map[string]any
+	if len(volcanoOptions) > 0 && volcanoOptions[0].Enabled {
+		queue := volcanoQueueName(volcanoOptions[0].QueuePrefix, spec.Labels["carrot.ai/tenant-id"])
+		dep.Spec.Template.Spec.SchedulerName = "volcano"
+		if dep.Spec.Template.Metadata.Annotations == nil {
+			dep.Spec.Template.Metadata.Annotations = map[string]string{}
+		}
+		dep.Spec.Template.Metadata.Annotations["scheduling.volcano.sh/group-name"] = spec.Name
+		podGroup = map[string]any{
+			"apiVersion": "scheduling.volcano.sh/v1beta1", "kind": "PodGroup",
+			"metadata": map[string]any{"name": spec.Name, "namespace": ns, "labels": labels},
+			"spec":     map[string]any{"minMember": spec.Replicas, "queue": queue},
+		}
 	}
 	var secret *k8s.Secret
 	if spec.ArtifactURI != "" {
@@ -733,7 +808,6 @@ func renderDeploymentManifests(spec *DeploymentSpec, ns, image string, gpuEnable
 			VolumeMounts: []k8s.VolumeMount{{Name: "model", MountPath: "/models"}},
 		}}
 		dep.Spec.Template.Spec.Containers[0].VolumeMounts = []k8s.VolumeMount{{Name: "model", MountPath: "/models", ReadOnly: true}}
-		dep.Spec.Template.Spec.Containers[0].Args[1] = "/models/model"
 	}
 	svc := &k8s.Service{
 		APIVersion: "v1",
@@ -741,11 +815,18 @@ func renderDeploymentManifests(spec *DeploymentSpec, ns, image string, gpuEnable
 		Metadata:   k8s.ObjectMeta{Name: spec.Name, Namespace: ns, Labels: labels},
 		Spec: k8s.ServiceSpec{
 			Selector: map[string]string{"app": spec.Name},
-			Ports:    []k8s.ServicePort{{Name: "http", Port: 80, TargetPort: 8000}},
+			Ports:    []k8s.ServicePort{{Name: "http", Port: 80, TargetPort: runtimeContainer.Port}},
 			Type:     "ClusterIP",
 		},
 	}
-	return &deployManifests{Deployment: dep, Service: svc, Secret: secret}, nil
+	return &deployManifests{Deployment: dep, Service: svc, Secret: secret, PodGroup: podGroup}, nil
+}
+
+func volcanoQueueName(prefix, tenantID string) string {
+	if tenantID == "" {
+		return "default"
+	}
+	return prefix + tenantID
 }
 
 // deployManifests 渲染产物
@@ -753,6 +834,7 @@ type deployManifests struct {
 	Deployment *k8s.Deployment
 	Service    *k8s.Service
 	Secret     *k8s.Secret
+	PodGroup   map[string]any
 }
 
 // 确保 json 引用

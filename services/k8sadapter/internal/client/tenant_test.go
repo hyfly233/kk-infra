@@ -17,7 +17,7 @@ func TestProvisionTenantCreatesIsolationResourcesOnce(t *testing.T) {
 		defer mu.Unlock()
 		key := r.URL.Path
 		if r.Method == http.MethodGet {
-			if posts < 6 && !created[key] {
+			if posts < 8 && !created[key] {
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
@@ -37,13 +37,13 @@ func TestProvisionTenantCreatesIsolationResourcesOnce(t *testing.T) {
 	if err := c.ProvisionTenant(context.Background(), "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
-	if posts != 6 {
-		t.Fatalf("created %d resources, want 6", posts)
+	if posts != 8 {
+		t.Fatalf("created %d resources, want 8", posts)
 	}
 	if err := c.ProvisionTenant(context.Background(), "tenant-a"); err != nil {
 		t.Fatal(err)
 	}
-	if posts != 6 {
+	if posts != 8 {
 		t.Fatalf("idempotent call created %d resources", posts)
 	}
 }

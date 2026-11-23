@@ -54,7 +54,7 @@ func TestProgressiveCRUDUsesRolloutOnly(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(map[string]any{})
 	}))
 	defer api.Close()
-	c := &RealKubeClient{baseURL: api.URL, httpClient: api.Client(), progressiveEnabled: true, prometheusURL: "http://prometheus:9090", virtualGPUs: DefaultFakeNodes()}
+	c := &RealKubeClient{baseURL: api.URL, httpClient: api.Client(), progressiveEnabled: true, prometheusURL: "http://prometheus:9090", volcanoEnabled: true, volcanoQueuePrefix: "tenant-", virtualGPUs: DefaultFakeNodes()}
 	spec := &DeploymentSpec{DeploymentID: "d1", Name: "qwen", Namespace: "tenant-t1", Replicas: 1, Resource: domain.Resource{GPUType: "A100", GPUCount: 1, MemoryMB: 1024}, ModelPath: "/models/qwen", Labels: map[string]string{"carrot.ai/deployment-id": "d1", "carrot.ai/tenant-id": "t1"}}
 	result, err := c.CreateDeployment(context.Background(), spec)
 	if err != nil {
@@ -79,7 +79,7 @@ func TestProgressiveCRUDUsesRolloutOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(paths, "\n")
-	for _, required := range []string{"POST /apis/argoproj.io/v1alpha1/namespaces/tenant-t1/rollouts", "PATCH /apis/argoproj.io/v1alpha1/namespaces/tenant-t1/rollouts/qwen", "POST /apis/networking.istio.io/v1beta1/namespaces/tenant-t1/virtualservices", "DELETE /apis/argoproj.io/v1alpha1/namespaces/tenant-t1/rollouts/qwen"} {
+	for _, required := range []string{"POST /apis/argoproj.io/v1alpha1/namespaces/tenant-t1/rollouts", "PATCH /apis/argoproj.io/v1alpha1/namespaces/tenant-t1/rollouts/qwen", "POST /apis/networking.istio.io/v1beta1/namespaces/tenant-t1/virtualservices", "DELETE /apis/argoproj.io/v1alpha1/namespaces/tenant-t1/rollouts/qwen", "POST /apis/scheduling.volcano.sh/v1beta1/queues", "POST /apis/scheduling.volcano.sh/v1beta1/namespaces/tenant-t1/podgroups", "DELETE /apis/scheduling.volcano.sh/v1beta1/namespaces/tenant-t1/podgroups/qwen"} {
 		if !strings.Contains(joined, required) {
 			t.Errorf("missing %s\n%s", required, joined)
 		}

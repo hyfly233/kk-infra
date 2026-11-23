@@ -38,6 +38,8 @@ type RealKubeClient struct {
 	artifactSecretKey  string
 	artifactSecure     bool
 	progressiveEnabled bool
+	volcanoEnabled     bool
+	volcanoQueuePrefix string
 }
 
 // ConfigureKEDA controls dynamic ScaledObject reconciliation for real clusters.
@@ -54,6 +56,11 @@ func (c *RealKubeClient) ConfigureArtifactStorage(endpoint, accessKey, secretKey
 }
 
 func (c *RealKubeClient) ConfigureProgressiveDelivery(enabled bool) { c.progressiveEnabled = enabled }
+
+func (c *RealKubeClient) ConfigureVolcano(enabled bool, queuePrefix string) {
+	c.volcanoEnabled = enabled
+	c.volcanoQueuePrefix = queuePrefix
+}
 
 // KubeConfig kubeconfig 结构（子集）
 type KubeConfig struct {

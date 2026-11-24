@@ -87,6 +87,7 @@ type PodTemplateSpec struct {
 // PodSpec Pod 规格
 type PodSpec struct {
 	NodeSelector   map[string]string `json:"nodeSelector,omitempty"`
+	SchedulerName  string            `json:"schedulerName,omitempty"`
 	Containers     []Container       `json:"containers"`
 	RestartPolicy  string            `json:"restartPolicy,omitempty"`
 	InitContainers []Container       `json:"initContainers,omitempty"`

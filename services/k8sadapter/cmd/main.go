@@ -28,6 +28,8 @@ func main() {
 	s3Endpoint := flag.String("s3-endpoint", "", "供模型 init container 使用的 S3/MinIO endpoint")
 	s3Secure := flag.Bool("s3-secure", false, "S3 endpoint 使用 TLS")
 	progressiveEnabled := flag.Bool("progressive-delivery", false, "使用 Argo Rollouts + Istio 执行渐进交付")
+	volcanoEnabled := flag.Bool("volcano-enabled", false, "使用 Volcano Queue/PodGroup 调度 GPU 工作负载")
+	volcanoQueuePrefix := flag.String("volcano-queue-prefix", "tenant-", "Volcano 租户队列名称前缀")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -45,6 +47,7 @@ func main() {
 		real.ConfigureKEDA(*kedaEnabled, *prometheusURL)
 		real.ConfigureArtifactStorage(*s3Endpoint, os.Getenv("S3_ACCESS_KEY"), os.Getenv("S3_SECRET_KEY"), *s3Secure)
 		real.ConfigureProgressiveDelivery(*progressiveEnabled)
+		real.ConfigureVolcano(*volcanoEnabled, *volcanoQueuePrefix)
 		kube = real
 		if *virtualGPUs != "" {
 			logger.Info("k8sadapter 使用真实集群 + 虚拟 GPU 池", "virtualGPUs", *virtualGPUs)

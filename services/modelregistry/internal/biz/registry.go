@@ -104,8 +104,8 @@ func (r *Registry) CreateVersion(modelID string, req *apitypes.CreateModelVersio
 	if runtime == "" {
 		runtime = domain.RuntimeVLLM
 	}
-	if runtime != domain.RuntimeVLLM {
-		return nil, errcode.New(errcode.ErrBadRequest, "MVP 仅支持 vLLM 运行时")
+	if !domain.IsSupportedRuntime(runtime) {
+		return nil, errcode.New(errcode.ErrBadRequest, "不支持的运行时: "+runtime)
 	}
 	now := time.Now()
 	v := &domain.ModelVersion{

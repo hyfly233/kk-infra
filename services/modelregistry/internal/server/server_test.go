@@ -178,11 +178,17 @@ func TestVersionRequiredFields(t *testing.T) {
 		t.Fatalf("缺权重地址应返回 400: %d", code)
 	}
 
-	// 非 vLLM 运行时
+	// Triton 是受支持运行时
 	_, code = doJSON(t, h, http.MethodPost, "/api/v1/models/"+modelID+"/versions",
 		apitypes.CreateModelVersionRequest{Version: "1.0", ArtifactURI: "s3://x/model", Runtime: "Triton", GPUType: "A100", GPUCount: 1, MemoryMB: 1024})
+	if code != http.StatusOK {
+		t.Fatalf("Triton 应可注册: %d", code)
+	}
+
+	_, code = doJSON(t, h, http.MethodPost, "/api/v1/models/"+modelID+"/versions",
+		apitypes.CreateModelVersionRequest{Version: "1.1", ArtifactURI: "s3://x/model", Runtime: "unknown", GPUType: "A100", GPUCount: 1, MemoryMB: 1024})
 	if code != http.StatusBadRequest {
-		t.Fatalf("非 vLLM 应返回 400: %d", code)
+		t.Fatalf("未知运行时应返回 400: %d", code)
 	}
 
 	_, code = doJSON(t, h, http.MethodPost, "/api/v1/models/"+modelID+"/versions",

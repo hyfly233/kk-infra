@@ -1,0 +1,142 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: jupyterhub
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jupyterhub
+  namespace: jupyterhub
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: carrot-jupyterhub-spawner
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "persistentvolumeclaims", "events", "services"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: carrot-jupyterhub-spawner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: carrot-jupyterhub-spawner
+subjects:
+  - kind: ServiceAccount
+    name: jupyterhub
+    namespace: jupyterhub
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jupyterhub-config
+  namespace: jupyterhub
+data:
+  jupyterhub_config.py: |
+    import os
+    import re
+    import requests
+    from jupyterhub.auth import Authenticator
+
+    class PlatformJWTAuthenticator(Authenticator):
+        async def authenticate(self, handler, data):
+            token = (data or {}).get("password", "").strip()
+            if not token:
+                return None
+            response = requests.post(
+                os.environ["PLATFORM_INTROSPECTION_URL"],
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10,
+            )
+            result = response.json()
+            tenant = result.get("tenantId", "")
+            if not result.get("active") or not re.fullmatch(r"[a-z0-9-]+", tenant):
+                return None
+            return {
+                "name": result["sub"],
+                "auth_state": {"tenant_id": tenant, "role": result["role"]},
+            }
+
+    async def configure_tenant_workspace(spawner):
+        auth_state = await spawner.user.get_auth_state()
+        tenant = auth_state["tenant_id"]
+        spawner.namespace = f"tenant-{tenant}"
+        spawner.service_account = "tenant-notebook"
+        spawner.scheduler_name = "volcano"
+        spawner.extra_labels = {
+            "carrot.ai/tenant-id": tenant,
+            "carrot.ai/workload": "notebook",
+            "carrot.ai/managed-by": "jupyterhub",
+        }
+        spawner.extra_annotations = {
+            "scheduling.volcano.sh/queue-name": f"tenant-{tenant}",
+        }
+
+    c.JupyterHub.authenticator_class = PlatformJWTAuthenticator
+    c.Authenticator.enable_auth_state = True
+    c.JupyterHub.spawner_class = "kubespawner.KubeSpawner"
+    c.Spawner.pre_spawn_hook = configure_tenant_workspace
+    c.KubeSpawner.image = os.environ.get("NOTEBOOK_IMAGE", "quay.io/jupyter/base-notebook:python-3.11")
+    c.KubeSpawner.default_url = "/lab"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jupyterhub
+  namespace: jupyterhub
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jupyterhub
+  template:
+    metadata:
+      labels:
+        app: jupyterhub
+    spec:
+      serviceAccountName: jupyterhub
+      containers:
+        - name: hub
+          image: quay.io/jupyterhub/k8s-hub:3.3.8
+          args: ["jupyterhub", "-f", "/etc/jupyterhub/jupyterhub_config.py"]
+          env:
+            - name: PLATFORM_INTROSPECTION_URL
+              value: http://controlplane.default.svc.cluster.local:8080/api/v1/auth/introspect
+            - name: JUPYTERHUB_CRYPT_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: jupyterhub-secrets
+                  key: crypt-key
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /hub/health
+              port: 8000
+          volumeMounts:
+            - name: config
+              mountPath: /etc/jupyterhub
+      volumes:
+        - name: config
+          configMap:
+            name: jupyterhub-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jupyterhub
+  namespace: jupyterhub
+spec:
+  selector:
+    app: jupyterhub
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000

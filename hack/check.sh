@@ -19,6 +19,7 @@ if [ ${#MODULES[@]} -eq 0 ]; then
     ./services/inference
     ./services/observability
     ./services/pipeline
+    ./services/disaggproxy
   )
 fi
 

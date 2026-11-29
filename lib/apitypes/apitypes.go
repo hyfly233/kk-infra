@@ -60,6 +60,7 @@ type CreateDeploymentRequest struct {
 	Namespace      string   `json:"namespace"` // 默认 tenant-<id>
 	Replicas       int32    `json:"replicas"`  // 默认 1
 	StartupArgs    []string `json:"startupArgs"`
+	ServingMode    string   `json:"servingMode"`
 }
 
 type ScaleDeploymentRequest struct {

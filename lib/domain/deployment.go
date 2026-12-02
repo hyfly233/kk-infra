@@ -16,6 +16,7 @@ type ModelDeployment struct {
 	Replicas       int32     `json:"replicas"`       // 期望副本数
 	Resource       Resource  `json:"resource"`       // 单副本资源规格
 	Runtime        string    `json:"runtime"`        // 运行时，如 vLLM
+	ServingMode    string    `json:"servingMode"`    // unified / disaggregated
 	StartupArgs    []string  `json:"startupArgs"`    // 启动参数（vLLM extra args）
 	Endpoint       string    `json:"endpoint"`       // 服务成功后返回的 API Endpoint
 	StableEndpoint string    `json:"stableEndpoint,omitempty"`
@@ -27,6 +28,11 @@ type ModelDeployment struct {
 	CreatedAt      time.Time `json:"createdAt"`
 	UpdatedAt      time.Time `json:"updatedAt"`
 }
+
+const (
+	ServingModeUnified       = "unified"
+	ServingModeDisaggregated = "disaggregated"
+)
 
 // DeploymentStatus 部署状态常量（与状态机一致）
 const (
